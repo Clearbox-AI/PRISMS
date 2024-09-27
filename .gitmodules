@@ -1,0 +1,3 @@
+[submodule "dataset_management/mimic_cxr_iv_multimodal/PRISMS_dataset_mimic_MedFuse"]
+	path = dataset_management/mimic_cxr_iv_multimodal/PRISMS_dataset_mimic_MedFuse
+	url = https://github.com/Clearbox-AI/PRISMS_dataset_mimic_MedFuse.git
