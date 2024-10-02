@@ -9997,3 +9997,4 @@ dataset_mimic_multimodal/Lib/site-packages/tqdm-4.55.1.dist-info/WHEEL
 .venv/Scripts/pip3.exe
 .venv/Scripts/python.exe
 .venv/Scripts/pythonw.exe
+/dataset_management/mimic_cxr_iv_multimodal/dataset_ABIDE/data/
