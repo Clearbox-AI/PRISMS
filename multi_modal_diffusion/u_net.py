@@ -1,8 +1,10 @@
 import torch.nn as nn
 import torch.nn.functional as F
+import math
+import torch as th
 from abc import abstractmethod
 
-from arch_utils import (conv_nd, avg_pool_nd, normalization, zero_module)
+from arch_utils import (conv_nd, avg_pool_nd, normalization, zero_module, count_flops_attn, checkpoint)
 
 
 class TimestepBlock(nn.Module):
@@ -125,6 +127,98 @@ class Downsample(nn.Module):
             # Image data downsampling
             x = self.op(x)
         return x
+
+
+class SingleModalQKVAttention(nn.Module):
+    """
+    A module which performs QKV attention and splits in a different order, adapted to handle both image and tabular data.
+    """
+
+    def __init__(self, n_heads):
+        super().__init__()
+        self.n_heads = n_heads
+
+    def forward(self, qkv):
+        """
+        Apply QKV attention.
+
+        :param qkv: Input tensor shaped [N, 3 * H * C, S], where S is the flattened spatial dimension for images or the feature dimension for tabular data.
+        :return: Output tensor shaped [N, H * C, S] after attention.
+        """
+        bs, width, length = qkv.shape
+        assert width % (3 * self.n_heads) == 0
+        ch = width // (3 * self.n_heads)
+
+        # Split Q, K, V from concatenated input
+        q, k, v = qkv.chunk(3, dim=1)
+        scale = 1 / math.sqrt(math.sqrt(ch))
+
+        # Calculate attention weights and apply them to values
+        weight = th.einsum(
+            "bct,bcs->bts",
+            (q * scale).view(bs * self.n_heads, ch, length),
+            (k * scale).view(bs * self.n_heads, ch, length),
+        )
+        weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
+        a = th.einsum("bts,bcs->bct", weight, v.reshape(bs * self.n_heads, ch, length))
+
+        # Reshape back to the expected output shape
+        return a.reshape(bs, -1, length)
+
+    @staticmethod
+    def count_flops(model, _x, y):
+        return count_flops_attn(model, _x, y)
+
+
+class SingleModalAtten(nn.Module):
+    """
+    An attention block that allows spatial (for images) or feature (for tabular data) positions to attend to each other.
+    """
+
+    def __init__(
+        self,
+        channels,
+        num_heads=1,
+        num_head_channels=-1,
+        use_checkpoint=False,
+    ):
+        super().__init__()
+        self.channels = channels
+
+        # Set the number of attention heads
+        if num_head_channels == -1:
+            self.num_heads = num_heads
+        else:
+            assert (
+                channels % num_head_channels == 0
+            ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
+            self.num_heads = channels // num_head_channels
+
+        self.use_checkpoint = use_checkpoint
+        self.norm = normalization(channels)
+
+        # Define qkv and projection layers; they will adapt based on input shape
+        self.qkv = conv_nd(1, channels, channels * 3, kernel_size=1)  # Conv1d for flexible shape handling
+        self.attention = SingleModalQKVAttention(self.num_heads)
+        self.proj_out = zero_module(conv_nd(1, channels, channels, kernel_size=1))
+
+    def forward(self, x):
+        return checkpoint(self._forward, (x,), self.parameters(), self.use_checkpoint)
+
+    def _forward(self, x):
+        """
+        Forward method for applying attention.
+
+        :param x: For images, [batch, channels, height, width]; for tabular, [batch, channels, features]
+        :return: x with attention applied.
+        """
+        b, c, *spatial = x.shape
+
+        qkv = self.qkv(self.norm(x))
+        h = self.attention(qkv)
+        h = self.proj_out(h)
+        return x + h.reshape(b, c, *spatial)
+
 
 
 class ResBlock(TimestepBlock):

@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch as th
+import numpy as np
 
 class GroupNorm32(nn.Module):
     def __init__(self, group, channel):
@@ -111,3 +112,27 @@ class CheckpointFunction(th.autograd.Function):
         del ctx.input_params
         del output_tensors
         return (None, None) + input_grads
+
+
+def count_flops_attn(model, _x, y):
+    """
+    A counter for the `thop` package to count the operations in an
+    attention operation for image and tabular data.
+    Meant to be used like:
+        macs, params = thop.profile(
+            model,
+            inputs=(inputs, timestamps),
+            custom_ops={QKVAttention: QKVAttention.count_flops},
+        )
+    """
+    b, c, *spatial = y[0].shape
+    if len(spatial) == 1:  # Tabular data
+        num_spatial = spatial[0]
+    else:  # Image data, height x width
+        num_spatial = int(np.prod(spatial))
+
+    # We perform two matmuls with the same number of ops.
+    # The first computes the weight matrix, the second computes
+    # the combination of the value vectors.
+    matmul_ops = 2 * b * (num_spatial ** 2) * c
+    model.total_ops += th.DoubleTensor([matmul_ops])
