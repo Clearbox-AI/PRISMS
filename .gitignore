@@ -9998,3 +9998,13 @@ dataset_mimic_multimodal/Lib/site-packages/tqdm-4.55.1.dist-info/WHEEL
 .venv/Scripts/python.exe
 .venv/Scripts/pythonw.exe
 /dataset_management/mimic_cxr_iv_multimodal/dataset_ABIDE/data/
+/dataset_management/mimic_cxr_iv_multimodal/dataset_MMIST_ccRCC/data/
+/model_garden/vqvae_venv/
+/dataset_management/dataset_ABIDE/abide_management/
+/dataset_management/dataset_ABIDE/data/
+/dataset_management/dataset_ABIDE/scripts/play_with_3d_brain.py
+/dataset_management/dataset_MIMIC_CXR_IV/data/
+/dataset_management/dataset_MIMIC_CXR_IV/mimic_management/
+/dataset_management/dataset_MMIST_ccRCC/data/
+/dataset_management/dataset_MMIST_ccRCC/MMIST_ccRCC_management/
+/dataset_management/dataset_MMIST_ccRCC/scripts/play_with_3d_mmist.py
