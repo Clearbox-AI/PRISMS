@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 import math
 import torch as th
 from abc import abstractmethod
@@ -331,11 +332,13 @@ class ResBlock(TimestepBlock):
 
         if self.image_attention:
             self.image_attention_block = SingleModalAtten(
-                channels=self.out_channels, num_heads=num_heads, use_checkpoint=use_checkpoint
+                channels=self.out_channels, num_heads=num_heads, num_head_channels=-1,
+                use_checkpoint=use_checkpoint
             )
         if self.tabular_attention:
             self.tabular_attention_block = SingleModalAtten(
-                channels=self.out_channels, num_heads=num_heads, use_checkpoint=use_checkpoint
+                channels=self.out_channels, num_heads=num_heads, num_head_channels=-1,
+                use_checkpoint=use_checkpoint
             )
 
     def forward(self, image, tabular, emb):
@@ -349,12 +352,17 @@ class ResBlock(TimestepBlock):
         Image shape: [batch, channels, height, width]
         Tabular shape: [batch, features]
         """
+
+        b, c, h, w = image.shape  # For image
+        _, _, f = tabular.shape  # For tabular data, where f is the number of features
+
         if self.updown:
             # Processed features
             img_h = self.image_in_layers(image)
-            img_h = self.img_up(img_h)
+            img_h = self.img_upd(img_h)
+
             tab_h = self.tabular_in_layers(tabular)
-            tab_h = self.tab_up(tab_h)
+            tab_h = self.tab_upd(tab_h)
 
             # Original inputs transformed to match processed features
             image = self.img_up_orig(image)
@@ -363,27 +371,32 @@ class ResBlock(TimestepBlock):
             img_h = self.image_in_layers(image)
             tab_h = self.tabular_in_layers(tabular)
 
-        # Embed timestep
+        # Process timestep embedding
         emb_out = self.emb_layers(emb).type(image.dtype)
-        img_emb_out = emb_out[:, None, :, None, None]  # Reshape for image dimensions
-        tab_emb_out = emb_out
 
-        # Apply scale-shift normalization if used
         if self.use_scale_shift_norm:
-            img_norm, img_rest = self.image_out_layers[0], self.image_out_layers[1:]
+            # Scale and shift for images
+            img_out_norm, img_out_rest = self.image_out_layers[0], self.image_out_layers[1:]
+            img_emb_out = emb_out[:, None, :, None, None]  # Reshape to broadcast across height and width
             scale, shift = th.chunk(img_emb_out, 2, dim=2)
-            img_h = img_norm(img_h) * (1 + scale) + shift
-            img_h = img_rest(img_h)
+            img_h = img_out_norm(img_h) * (1 + scale) + shift
+            img_h = img_out_rest(img_h)
 
-            tab_norm, tab_rest = self.tabular_out_layers[0], self.tabular_out_layers[1:]
+            # Scale and shift for tabular data
+            tab_out_norm, tab_out_rest = self.tabular_out_layers[0], self.tabular_out_layers[1:]
+            tab_emb_out = emb_out[..., None]  # Reshape to [batch, channels, 1] to broadcast across features
             scale, shift = th.chunk(tab_emb_out, 2, dim=1)
-            tab_h = tab_norm(tab_h) * (1 + scale) + shift
-            tab_h = tab_rest(tab_h)
+            tab_h = tab_out_norm(tab_h) * (1 + scale) + shift
+            tab_h = tab_out_rest(tab_h)
+
         else:
-            img_h += img_emb_out
+            # If no scale-shift normalization, directly add the embedding
+            img_emb_out = emb_out[:, None, :, None, None]  # Broadcast across spatial dimensions for images
+            img_h = img_h + img_emb_out
             img_h = self.image_out_layers(img_h)
 
-            tab_h += tab_emb_out
+            tab_emb_out = emb_out[..., None]  # Broadcast across features for tabular data
+            tab_h = tab_h + tab_emb_out
             tab_h = self.tabular_out_layers(tab_h)
 
         # Add skip connections
@@ -393,12 +406,13 @@ class ResBlock(TimestepBlock):
         # Apply attention if enabled
         if self.image_attention:
             image_out = rearrange(image_out, "b c h w -> b (h w) c")
-            image_out = self.image_attention_block(image_out)
-            image_out = rearrange(image_out, "b (h w) c -> b c h w", h=image.shape[2])
+            image_out = self.spatial_attention_block(image_out)
+            image_out = rearrange(image_out, "b (h w) c -> b c h w", h=h, w=w)
 
         if self.tabular_attention:
             tabular_out = self.tabular_attention_block(tabular_out)
 
         return image_out, tabular_out
+
 
 
