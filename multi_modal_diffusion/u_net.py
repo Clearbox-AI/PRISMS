@@ -415,4 +415,120 @@ class ResBlock(TimestepBlock):
         return image_out, tabular_out
 
 
+class QKVAttention(nn.Module):
+    """
+    A module which performs QKV attention and splits in a different order for image and tabular data.
+    """
 
+    def __init__(self, n_heads):
+        super().__init__()
+        self.n_heads = n_heads
+
+    def forward(self, qkv, image_len, tabular_len):
+        """
+        Apply QKV attention.
+
+        :param qkv: A tensor of Qs, Ks, and Vs concatenated, [batch, 3 * n_heads * channels, length]
+        :param image_len: Number of tokens in the image portion.
+        :param tabular_len: Number of tokens in the tabular portion.
+        :return: Attention outputs for both image and tabular tokens.
+        """
+
+        bs, width, _ = qkv.shape
+        assert width % (3 * self.n_heads) == 0
+        ch = width // (3 * self.n_heads)
+
+        # Split Q, K, V from concatenated input
+        q, k, v = qkv.chunk(3, dim=1)
+        scale = 1 / math.sqrt(ch)
+
+        # Separate Q, K, V for image and tabular parts
+        img_q, tab_q = q[:, :, :image_len], q[:, :, image_len:]
+        img_k, tab_k = k[:, :, :image_len], k[:, :, image_len:]
+        img_v, tab_v = v[:, :, :image_len], v[:, :, image_len:]
+
+        # Compute attention for images and tabular data
+        img_weight = th.softmax(th.einsum("bct,bcs->bts", img_q * scale, img_k * scale), dim=-1)
+        img_a = th.einsum("bts,bcs->bct", img_weight, img_v)
+
+        tab_weight = th.softmax(th.einsum("bct,bcs->bts", tab_q * scale, tab_k * scale), dim=-1)
+        tab_a = th.einsum("bts,bcs->bct", tab_weight, tab_v)
+
+        return img_a.reshape(bs, -1, image_len), tab_a.reshape(bs, -1, tabular_len)
+
+    @staticmethod
+    def count_flops(model, _x, y):
+        return count_flops_attn(model, _x, y)
+
+
+class CrossAttentionBlock(nn.Module):
+    """
+    Cross-attention block for image and tabular data.
+    """
+
+    def __init__(
+        self,
+        channels,
+        num_heads=1,
+        num_head_channels=-1,
+        use_checkpoint=False,
+        local_window=1,
+        window_shift=False,
+    ):
+        super().__init__()
+        self.channels = channels
+
+        # Set the number of heads
+        if num_head_channels == -1:
+            self.num_heads = num_heads
+        else:
+            assert (
+                self.channels % num_head_channels == 0
+            ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
+            self.num_heads = self.channels // num_head_channels
+
+        self.local_window = local_window
+        self.window_shift = window_shift
+        self.use_checkpoint = use_checkpoint
+
+        # Normalization and QKV computation for image and tabular data
+        self.img_norm = normalization(self.channels)
+        self.tab_norm = normalization(self.channels)
+        self.img_qkv = conv_nd(1, self.channels, self.channels * 3, kernel_size=1)
+        self.tab_qkv = conv_nd(1, self.channels, self.channels * 3, kernel_size=1)
+        self.attention = QKVAttention(self.num_heads)
+
+        # Projection layers for image and tabular
+        self.img_proj_out = zero_module(conv_nd(2, self.channels, self.channels, kernel_size=1))
+        self.tab_proj_out = zero_module(conv_nd(1, self.channels, self.channels, kernel_size=1))
+
+    def forward(self, image, tabular):
+        return checkpoint(self._forward, (image, tabular), self.parameters(), True)
+
+    def _forward(self, image, tabular):
+        """
+        Forward method for cross-attention between image and tabular data.
+
+        :param image: Image tokens of shape [batch, channels, height * width]
+        :param tabular: Tabular tokens of shape [batch, channels, features]
+        """
+        b, c, hw = image.shape  # Flattened image tokens
+        _, _, f = tabular.shape  # Tabular features
+
+        # Normalize and compute QKV for image and tabular data
+        img_qkv = self.img_qkv(self.img_norm(image))
+        tab_qkv = self.tab_qkv(self.tab_norm(tabular))
+        qkv = th.cat([img_qkv, tab_qkv], dim=2)
+
+        # Cross attention between image and tabular tokens
+        img_h, tab_h = self.attention(qkv, image_len=hw, tabular_len=f)
+
+        # Project output back to original shape
+        img_h = self.img_proj_out(img_h).view(b, c, hw)
+        tab_h = self.tab_proj_out(tab_h).view(b, c, f)
+
+        # Skip connection
+        image_out = image + img_h
+        tabular_out = tabular + tab_h
+
+        return image_out, tabular_out
