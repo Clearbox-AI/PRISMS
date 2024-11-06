@@ -5,8 +5,10 @@ import math
 import torch as th
 from abc import abstractmethod
 
-from arch_utils import (conv_nd, avg_pool_nd, normalization, zero_module, count_flops_attn, checkpoint)
-
+from arch_utils import (conv_nd, avg_pool_nd, normalization, zero_module, count_flops_attn, checkpoint,
+                        timestep_embedding)
+from fp16_util import (convert_module_to_f16, convert_module_to_f32)
+from . import logger
 
 class TimestepBlock(nn.Module):
     """
@@ -18,6 +20,21 @@ class TimestepBlock(nn.Module):
         """
         Apply the module to `x` given `emb` timestep embeddings.
         """
+
+class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
+    """
+    A sequential module that passes timestep embeddings to the children that
+    support it as an extra input.
+    """
+
+    def forward(self, image, tabular, emb):
+        for layer in self:
+            if isinstance(layer, TimestepBlock):
+                image, tabular = layer(image, tabular, emb)
+            else:
+                image, tabular = layer(image, tabular)
+        return image, tabular
+
 
 class InitialBlock(nn.Module):
     def __init__(
@@ -532,3 +549,340 @@ class CrossAttentionBlock(nn.Module):
         tabular_out = tabular + tab_h
 
         return image_out, tabular_out
+
+
+class MultimodalUNet(nn.Module):
+    """
+    The full coupled-UNet model with attention and timestep embedding, adapted for image and tabular data.
+    """
+
+    def __init__(
+            self,
+            image_size,
+            tabular_size,
+            model_channels,
+            image_out_channels,
+            tabular_out_channels,
+            num_res_blocks,
+            cross_attention_resolutions,
+            cross_attention_windows,
+            cross_attention_shift,
+            image_attention_resolutions,
+            tabular_attention_resolutions,
+            # image_type="2d",
+            # tabular_type="1d",
+            dropout=0,
+            channel_mult=(1, 2, 3, 4),
+            num_classes=None,
+            use_checkpoint=False,
+            use_fp16=False,
+            num_heads=1,
+            num_head_channels=-1,
+            num_heads_upsample=-1,
+            use_scale_shift_norm=False,
+            resblock_updown=True,
+    ):
+        super().__init__()
+
+        if num_heads_upsample == -1:
+            num_heads_upsample = num_heads
+
+        self.image_size = image_size
+        self.tabular_size = tabular_size
+        self.model_channels = model_channels
+        self.image_out_channels = image_out_channels
+        self.tabular_out_channels = tabular_out_channels
+        self.num_res_blocks = num_res_blocks
+        self.cross_attention_resolutions = cross_attention_resolutions
+        self.cross_attention_windows = cross_attention_windows
+        self.cross_attention_shift = cross_attention_shift
+        self.image_attention_resolutions = image_attention_resolutions
+        self.tabular_attention_resolutions = tabular_attention_resolutions
+        self.dropout = dropout
+        self.channel_mult = channel_mult
+        self.num_classes = num_classes
+        self.use_checkpoint = use_checkpoint
+        self.dtype = th.float16 if use_fp16 else th.float32
+        self.num_heads = num_heads
+        self.num_head_channels = num_head_channels
+        self.num_heads_upsample = num_heads_upsample
+
+        time_embed_dim = model_channels
+        self.time_embed = nn.Sequential(
+            conv_nd(0, model_channels, time_embed_dim),
+            nn.SiLU(),
+            conv_nd(0, time_embed_dim, time_embed_dim),
+        )
+
+        if self.num_classes is not None:
+            self.label_emb = nn.Embedding(num_classes, time_embed_dim)
+
+        ch = input_ch = int(channel_mult[0] * model_channels)
+        self._feature_size = ch
+        input_block_chans = [ch]
+
+        # Initial input blocks
+        self.input_blocks = nn.ModuleList([TimestepEmbedSequential(InitialBlock(
+            self.image_size[0], self.tabular_size, image_out_channels=ch, tabular_out_channels=ch
+        ))])
+
+        ds = 1
+        # dilation = 1
+
+        # Build input blocks and cross attention layers
+        for level, mult in enumerate(channel_mult):
+            for block_id in range(num_res_blocks):
+                layers = [
+                    ResBlock(
+                        ch,
+                        time_embed_dim,
+                        dropout,
+                        out_channels=int(mult * model_channels),
+                        # image_type=image_type,
+                        # tabular_type=tabular_type,
+                        use_checkpoint=use_checkpoint,
+                        use_scale_shift_norm=use_scale_shift_norm,
+                        image_attention=ds in self.image_attention_resolutions,
+                        tabular_attention=ds in self.tabular_attention_resolutions,
+                        num_heads=num_heads,
+                    )
+                ]
+
+                ch = int(mult * model_channels)
+
+                if ds in cross_attention_resolutions:
+                    ds_i = cross_attention_resolutions.index(ds)
+                    layers.append(
+                        CrossAttentionBlock(
+                            ch,
+                            use_checkpoint=use_checkpoint,
+                            num_heads=num_heads,
+                            local_window=cross_attention_windows[ds_i],
+                            window_shift=cross_attention_shift,
+                            num_head_channels=num_head_channels,
+                        )
+                    )
+
+                self.input_blocks.append(TimestepEmbedSequential(*layers))
+                self._feature_size += ch
+                input_block_chans.append(ch)
+
+            if level != len(channel_mult) - 1:
+                out_ch = ch
+                self.input_blocks.append(
+                    TimestepEmbedSequential(
+                        ResBlock(
+                            ch,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=out_ch,
+                            # image_type=image_type,
+                            # tabular_type=tabular_type,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                            down=True,
+                        )
+                    )
+                )
+                input_block_chans.append(ch)
+                ds *= 2
+                self._feature_size += ch
+
+        # Middle blocks
+        self.middle_blocks = TimestepEmbedSequential(
+            ResBlock(
+                ch,
+                time_embed_dim,
+                dropout,
+                # image_type=image_type,
+                # tabular_type=tabular_type,
+                use_checkpoint=use_checkpoint,
+                use_scale_shift_norm=use_scale_shift_norm,
+                image_attention=True,
+                tabular_attention=True,
+                num_heads=num_heads,
+            ),
+            CrossAttentionBlock(
+                ch,
+                use_checkpoint=use_checkpoint,
+                num_heads=num_heads,
+                num_head_channels=num_head_channels,
+            ),
+            ResBlock(
+                ch,
+                time_embed_dim,
+                dropout,
+                # image_type=image_type,
+                # tabular_type=tabular_type,
+                use_checkpoint=use_checkpoint,
+                use_scale_shift_norm=use_scale_shift_norm,
+                image_attention=True,
+                tabular_attention=True,
+                num_heads=num_heads,
+            ),
+        )
+        self._feature_size += ch
+
+        # Output blocks
+        self.output_blocks = nn.ModuleList([])
+        for level, mult in list(enumerate(channel_mult))[::-1]:
+            for block_id in range(num_res_blocks + 1):
+                ich = input_block_chans.pop()
+                layers = [
+                    ResBlock(
+                        ch + ich,
+                        time_embed_dim,
+                        dropout,
+                        out_channels=int(model_channels * mult),
+                        # image_type=image_type,
+                        # tabular_type=tabular_type,
+                        use_checkpoint=use_checkpoint,
+                        use_scale_shift_norm=use_scale_shift_norm,
+                        image_attention=ds in self.image_attention_resolutions,
+                        tabular_attention=ds in self.tabular_attention_resolutions,
+                        num_heads=num_heads,
+                    )
+                ]
+
+                ch = int(model_channels * mult)
+                if ds in cross_attention_resolutions:
+                    ds_i = cross_attention_resolutions.index(ds)
+                    layers.append(
+                        CrossAttentionBlock(
+                            ch,
+                            use_checkpoint=use_checkpoint,
+                            local_window=cross_attention_windows[ds_i],
+                            window_shift=cross_attention_shift,
+                            num_heads=num_heads,
+                            num_head_channels=num_head_channels,
+                        )
+                    )
+
+                if level and block_id == num_res_blocks:
+                    out_ch = ch
+                    if resblock_updown:
+                        layers.append(
+                            ResBlock(
+                                ch,
+                                time_embed_dim,
+                                dropout,
+                                out_channels=out_ch,
+                                # image_type=image_type,
+                                # tabular_type=tabular_type,
+                                use_checkpoint=use_checkpoint,
+                                use_scale_shift_norm=use_scale_shift_norm,
+                                up=True,
+                            )
+                        )
+                        ds //= 2
+
+                self._feature_size += ch
+                self.output_blocks.append(TimestepEmbedSequential(*layers))
+
+        # Output projections
+        self.tabular_out = nn.Sequential(
+            normalization(ch),
+            nn.SiLU(),
+            zero_module(conv_nd(1, input_ch, tabular_out_channels, 3)),
+        )
+        self.image_out = nn.Sequential(
+            normalization(ch),
+            nn.SiLU(),
+            zero_module(conv_nd(2, input_ch, image_out_channels, kernel_size=3)),
+        )
+
+    # Methods for FP16 conversion
+    def convert_to_fp16(self):
+        """
+        Convert the torso of the model to float16.
+        """
+        self.input_blocks.apply(convert_module_to_f16)
+        self.middle_blocks.apply(convert_module_to_f16)
+        self.output_blocks.apply(convert_module_to_f16)
+        self.image_out.apply(convert_module_to_f16)
+        self.tabular_out.apply(convert_module_to_f16)
+
+    def convert_to_fp32(self):
+        """
+        Convert the torso of the model to float32.
+        """
+        self.input_blocks.apply(convert_module_to_f32)
+        self.middle_blocks.apply(convert_module_to_f32)
+        self.output_blocks.apply(convert_module_to_f32)
+        self.video_out.apply(convert_module_to_f32)
+        self.audio_out.apply(convert_module_to_f32)
+
+    def load_state_dict_(self, state_dict, is_strict=False):
+
+        for key, val in self.state_dict().items():
+
+            if key in state_dict.keys():
+                if val.shape == state_dict[key].shape:
+                    continue
+                else:
+                    state_dict.pop(key)
+                    logger.log("{} not matchable with state_dict with shape {}".format(key, val.shape))
+            else:
+
+                logger.log("{} not exists in state_dict".format(key))
+
+        for key, val in state_dict.items():
+            if key in self.state_dict().keys():
+                if val.shape == state_dict[key].shape:
+                    continue
+            else:
+                logger.log("{} not used in state_dict".format(key))
+        self.load_state_dict(state_dict, strict=is_strict)
+        return
+
+    def forward(self, image, tabular, timesteps, label=None):
+        """
+        Apply the model to an input batch.
+        :param image: an [N x C x H x W] Tensor of image inputs.
+        :param tabular: an [N x F] Tensor of tabular inputs.
+        :param timesteps: a 1-D batch of timesteps.
+        :param label: an [N] Tensor of labels, if class-conditional.
+        :return: an image output of [N x C x H x W] Tensor, a tabular output of [N x F]
+        """
+
+        assert (label is not None) == (
+                self.num_classes is not None
+        ), "must specify y if and only if the model is class-conditional"
+
+        # Lists to store intermediate outputs for skip connections
+        image_hs = []
+        tabular_hs = []
+
+        # Generate time embeddings
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+
+        # If class-conditional, add class label embedding
+        if self.num_classes is not None:
+            assert label.shape == (image.shape[0],)
+            emb = emb + self.label_emb(label)
+
+        # Ensure inputs are in the correct dtype
+        image = image.type(self.dtype)
+        tabular = tabular.type(self.dtype)
+
+        # Encoder: Process through input blocks and save intermediate outputs
+        for m_id, module in enumerate(self.input_blocks):
+            image, tabular = module(image, tabular, emb)
+            image_hs.append(image)
+            tabular_hs.append(tabular)
+
+        # Middle blocks
+        image, tabular = self.middle_blocks(image, tabular, emb)
+
+        # Decoder: Process through output blocks, adding skip connections
+        for m_id, module in enumerate(self.output_blocks):
+            image = th.cat([image, image_hs.pop()], dim=1)
+            tabular = th.cat([tabular, tabular_hs.pop()], dim=1)
+            image, tabular = module(image, tabular, emb)
+
+        # Final output layers for image and tabular data
+        image = self.image_out(image)
+        tabular = self.tabular_out(tabular)
+
+        return image, tabular
+
