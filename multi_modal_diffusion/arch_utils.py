@@ -3,23 +3,44 @@ import torch as th
 import numpy as np
 import math
 
+# class GroupNorm32(nn.Module):
+#     def __init__(self, group, channel):
+#         super(GroupNorm32, self).__init__()
+#         self.channel = channel
+#         self.norm_op = nn.GroupNorm(group, channel)
+#
+#     def forward(self, x):
+#         # Image data: [batch, channels, height, width]
+#         if x.dim() == 4:
+#             x = self.GroupNorm(x.float()).type(x.dtype)
+#         # Tabular data:
+#         # If x is [batch, features] (2D), or [batch, channels, features] (3D), treat features as a spatial dimension
+#         elif x.dim() == 2 or x.dim() == 3:
+#             x = self.GroupNorm(x.unsqueeze(-1).float()).type(x.dtype).squeeze(-1)
+#         else:
+#             raise ValueError("Unsupported tensor shape for GroupNorm32. Expected 2D, 3D, or 4D tensor.")
+#         return x
+
+
 class GroupNorm32(nn.Module):
     def __init__(self, group, channel):
         super(GroupNorm32, self).__init__()
         self.channel = channel
+        self.group = group
         self.GroupNorm = nn.GroupNorm(group, channel)
+        self.LayerNorm = nn.LayerNorm(channel)
 
     def forward(self, x):
-        # Image data: [batch, channels, height, width]
-        if x.dim() == 4:
+        # For 4D data (e.g., images with [batch, channels, height, width]) and 3D data, use GroupNorm
+        if x.dim() == 4 or x.dim() == 3 or x.dim() == 2:
             x = self.GroupNorm(x.float()).type(x.dtype)
-        # Tabular data:
-        # If x is [batch, features] (2D), or [batch, channels, features] (3D), treat features as a spatial dimension
-        elif x.dim() == 2 or x.dim() == 3:
-            x = self.GroupNorm(x.unsqueeze(-1).float()).type(x.dtype).squeeze(-1)
+        # For 2D data (e.g., tabular with [batch, features]), use LayerNorm
+        # elif x.dim() == 2:
+        #     x = self.LayerNorm(x.float()).type(x.dtype)
         else:
-            raise ValueError("Unsupported tensor shape for GroupNorm32. Expected 2D, 3D, or 4D tensor.")
+            raise ValueError("Unsupported tensor shape for AdaptiveNorm. Expected 2D, 3D, or 4D tensor.")
         return x
+
 
 
 def conv_nd(dims, *args, **kwargs):
