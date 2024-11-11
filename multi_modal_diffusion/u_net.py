@@ -10,6 +10,9 @@ from arch_utils import (conv_nd, avg_pool_nd, normalization, zero_module, count_
 from fp16_util import (convert_module_to_f16, convert_module_to_f32)
 import logger
 
+from runtime.runtime_utils import ShapeManager
+shape_manager = ShapeManager()
+
 class TimestepBlock(nn.Module):
     """
     Any module where forward() takes timestep embeddings as a second argument.
@@ -137,7 +140,7 @@ class Upsample(nn.Module):
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
-        self.stride = 4 if dims == 1 else 2  # 4x for tabular (1D), 2x for image (2D)
+        self.stride = 2 if dims == 1 else 2  # 2x for tabular (1D), 2x for image (2D)
 
         # Define convolution based on dimensions if needed
         if use_conv:
@@ -147,12 +150,29 @@ class Upsample(nn.Module):
                 self.conv = conv_nd(1, self.channels, self.out_channels, kernel_size=3) # TAB_LIN
 
     def forward(self, x):
-        if self.dims == 2:
-            # Upsample for images with height and width dimensions
-            x = F.interpolate(x, scale_factor=(self.stride, self.stride), mode="nearest")
-        elif self.dims == 1:
-            # Upsample for tabular data
-            x = F.interpolate(x, scale_factor=self.stride, mode="nearest")
+        target_shape = shape_manager.load_upsample_shape(self.dims)
+        # target_shape = None
+
+        if target_shape is not None:
+            if self.dims == 2:
+                target_size = target_shape[-2:]  # For 2D data (height, width)
+
+                # Upsample for images with height and width dimensions
+                # x = F.interpolate(x, scale_factor=(self.stride, self.stride), mode="nearest")
+            elif self.dims == 1:
+                target_size = (target_shape[-1],)  # For 1D data (features)
+
+                # Upsample for tabular data
+                # x = F.interpolate(x, scale_factor=self.stride, mode="nearest")
+            x = F.interpolate(x, size=target_size, mode="nearest")
+
+        else:
+            if self.dims == 2:
+                # Upsample for images with height and width dimensions
+                x = F.interpolate(x, scale_factor=(self.stride, self.stride), mode="nearest")
+            elif self.dims == 1:
+                # Upsample for tabular data
+                x = F.interpolate(x, scale_factor=self.stride, mode="nearest")
 
         # Apply convolution if specified
         if self.use_conv:
@@ -178,7 +198,7 @@ class Downsample(nn.Module):
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
-        stride = 4 if dims == 1 else 2  # Downsampling factor: 4 for tabular, 2 for image
+        stride = 2 if dims == 1 else 2  # Downsampling factor: 2 for tabular, 2 for image
 
         # Define downsampling operation
         if use_conv:
@@ -197,6 +217,9 @@ class Downsample(nn.Module):
                 # self.op = conv_nd(0, self.channels, self.out_channels // 2)  # TAB_LIN
                 # self.op = nn.AvgPool1d(kernel_size=stride, stride=stride)
     def forward(self, x):
+        # Save the shape of the tensor during downsampling if it's smaller than the last recorded shape
+        shape_manager.save_downsample_shape(x.shape, self.dims)
+
         return self.op(x)
 
 
@@ -743,9 +766,9 @@ class MultimodalUNet(nn.Module):
         self._feature_size = ch
         input_block_chans = [ch]
 
-        # Initial input blocks
+        # Initial input blocks #TODO
         self.input_blocks = nn.ModuleList([TimestepEmbedSequential(InitialBlock(
-            self.image_size[0], self.tabular_size, image_out_channels=ch, tabular_out_features=ch
+            self.image_size[0], self.tabular_size[0], image_out_channels=ch, tabular_out_features=ch
         ))])
 
         ds = 1
@@ -1006,6 +1029,9 @@ class MultimodalUNet(nn.Module):
         image = self.image_out(image)
         tabular = self.tabular_out(tabular)
 
+        # TODO
+        shape_manager.delete_file()
+
         return image, tabular
 
 
@@ -1022,9 +1048,9 @@ if __name__ == '__main__':
     model_channels = 192
     emb_channels = 128
     image_size = [3, 64, 64]  # Channels, Height, Width for image data
-    tabular_size = 100  # Number of features in tabular data
+    tabular_size = [100, 100]  # Number of features in tabular data
     image_out_channels = 3
-    tabular_out_channels = 1
+    tabular_out_channels = 100 # TODO: set as tabular_size since tabular is handled as [b, c, f]
     num_heads = 2
     num_res_blocks = 1
     cross_attention_resolutions = [4, 8, 16]
@@ -1063,8 +1089,10 @@ if __name__ == '__main__':
 
         # Dummy data for image and tabular inputs
         image = th.randn([1, 3, 64, 64]).to(device)  # Batch size, Channels, Height, Width
-        tabular = th.randn([1, tabular_size]).to(device)  # Batch size, Features
-        tabular = tabular.unsqueeze(1).repeat(1, tabular_size, 1) # to handle tabular as 2d data
+        # tabular = th.randn([1, tabular_size]).to(device)  # Batch size, Features
+        # tabular = tabular.unsqueeze(1).repeat(1, tabular_size, 1) # to handle tabular as 2d data
+        tabular = th.randn([1, 100, 100]).to(device)
+
         time_index = th.tensor([1]).to(device)
 
         # Forward pass
