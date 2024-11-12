@@ -131,13 +131,20 @@ class CheckpointFunction(th.autograd.Function):
         ctx.run_function = run_function
         ctx.input_tensors = list(args[:length])
         ctx.input_params = list(args[length:])
+
+        # Run forward pass and capture outputs
         with th.no_grad():
             output_tensors = ctx.run_function(*ctx.input_tensors)
+
         return output_tensors
+
+
+
 
     @staticmethod
     def backward(ctx, *output_grads):
         ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
+
         with th.enable_grad():
             # Fixes a bug where the first op in run_function modifies the
             # Tensor storage in place, which is not allowed for detach()'d
@@ -145,15 +152,12 @@ class CheckpointFunction(th.autograd.Function):
             shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
             output_tensors = ctx.run_function(*shallow_copies)
 
-        try:
-            input_grads = th.autograd.grad(
-                output_tensors,
-                ctx.input_tensors + ctx.input_params,
-                output_grads,
-                allow_unused=True
-            )
-        except:
-            a = 3
+        input_grads = th.autograd.grad(
+            output_tensors,
+            ctx.input_tensors + ctx.input_params,
+            output_grads,
+            allow_unused=True
+        )
 
         del ctx.input_tensors
         del ctx.input_params

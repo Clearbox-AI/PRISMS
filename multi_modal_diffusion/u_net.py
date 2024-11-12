@@ -10,8 +10,10 @@ from arch_utils import (conv_nd, avg_pool_nd, normalization, zero_module, count_
 from fp16_util import (convert_module_to_f16, convert_module_to_f32)
 import logger
 
+#TODO:
 from runtime.runtime_utils import ShapeManager
-shape_manager = ShapeManager()
+# shape_manager = ShapeManager()
+
 
 class TimestepBlock(nn.Module):
     """
@@ -1029,9 +1031,6 @@ class MultimodalUNet(nn.Module):
         image = self.image_out(image)
         tabular = self.tabular_out(tabular)
 
-        # TODO
-        shape_manager.delete_file()
-
         return image, tabular
 
 
@@ -1048,9 +1047,9 @@ if __name__ == '__main__':
     model_channels = 192
     emb_channels = 128
     image_size = [3, 64, 64]  # Channels, Height, Width for image data
-    tabular_size = [100, 100]  # Number of features in tabular data
+    tabular_size = [96, 96]  # Number of features in tabular data
     image_out_channels = 3
-    tabular_out_channels = 100 # TODO: set as tabular_size since tabular is handled as [b, c, f]
+    tabular_out_channels = 96 # TODO: set as tabular_size since tabular is handled as [b, c, f]
     num_heads = 2
     num_res_blocks = 1
     cross_attention_resolutions = [4, 8, 16]
@@ -1079,19 +1078,35 @@ if __name__ == '__main__':
         use_checkpoint=True
     ).to(device)
 
+    #TODO:
+    # Define the hook function
+
+    layer_outputs = {}
+    def hook_fn(module, input, output):
+        layer_outputs[module] = output.shape if isinstance(output, th.Tensor) else [o.shape for o in output]
+
+    # Register hooks for each layer in the model
+    for name, layer in model.named_modules():
+        layer.register_forward_hook(hook_fn)
+
     # Optimizer
     optim = th.optim.SGD(model.parameters(), lr=lr)
 
     # Training loop
     model.train()
     while True:
+
+        # TODO
+        shape_manager = ShapeManager()
+
+
         time_start = time.time()
 
         # Dummy data for image and tabular inputs
         image = th.randn([1, 3, 64, 64]).to(device)  # Batch size, Channels, Height, Width
         # tabular = th.randn([1, tabular_size]).to(device)  # Batch size, Features
         # tabular = tabular.unsqueeze(1).repeat(1, tabular_size, 1) # to handle tabular as 2d data
-        tabular = th.randn([1, 100, 100]).to(device)
+        tabular = th.randn([1, 96, 96]).to(device)
 
         time_index = th.tensor([1]).to(device)
 
@@ -1110,4 +1125,7 @@ if __name__ == '__main__':
 
         # Logging
         print(f"loss: {loss.item()} time: {time.time() - time_start}")
+
+        # TODO
+        shape_manager.delete_file()
 
