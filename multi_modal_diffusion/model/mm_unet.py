@@ -281,7 +281,7 @@ class SingleModalAtten(nn.Module):
 
     def _forward(self, x):
         if self.is_tabular:
-            # x: [batch, features]
+            # TODO: check methodology
             x = self.norm(x)
             qkv = self.qkv(x)  # [batch, features * 3]
             qkv = qkv.view(x.shape[0], 3, self.channels)  # [batch, 3, channels]
@@ -703,15 +703,18 @@ class CrossAttentionBlock(nn.Module):
         self.tab_norm = normalization(self.channels)
 
         # QKV computation for image and tabular data
-        self.img_qkv = nn.Linear(self.channels, self.channels * 3)
+        # self.img_qkv = nn.Linear(self.channels, self.channels * 3)
+        self.img_qkv = conv_nd(1, self.channels, self.channels * 3, kernel_size=1)
         self.tab_qkv = nn.Linear(self.channels, self.channels * 3)
 
         # Attention
         self.attention = QKVAttention(self.num_heads)
 
         # Projection layers for image and tabular
-        self.img_proj_out = zero_module(nn.Linear(self.channels, self.channels))
-        self.tab_proj_out = zero_module(nn.Linear(self.channels, self.channels))
+        # self.img_proj_out = zero_module(nn.Linear(self.channels, self.channels))
+        # TODO: check for initialization instead of zero_module (eg. Kaiming initialization for convolutional layers)
+        self.img_proj_out = zero_module(ImageConv(self.channels, self.channels, kernel_size=1))
+        self.tab_proj_out = zero_module(TabularMLP(self.channels, self.channels))
 
     def forward(self, image, tabular):
         return checkpoint(self._forward, (image, tabular), self.parameters(), self.use_checkpoint)
@@ -728,8 +731,10 @@ class CrossAttentionBlock(nn.Module):
         b_t, c_t = tabular.shape   # Tabular dimensions (channels)
 
         # Flatten spatial dimensions for image tokens
-        image_token = rearrange(image, "b c h w -> b (h w) c")  # [batch_size, seq_len, channels]
-        tabular_token = tabular.unsqueeze(1)  # [batch_size, 1, channels]
+        image_token = rearrange(image, "b c h w -> b c (h w)")  # [batch_size, channels, seq_len]
+        seq_len_image = image_token.shape[2]
+        # tabular_token = tabular.unsqueeze(1)  # [batch_size, 1, channels]
+        tabular_token = tabular
 
         # Normalize
         image_token = self.img_norm(image_token)
@@ -740,11 +745,12 @@ class CrossAttentionBlock(nn.Module):
         tab_qkv = self.tab_qkv(tabular_token)  # [batch_size, 1, 3 * channels]
 
         # Concatenate along sequence length dimension
-        qkv = torch.cat([img_qkv.transpose(1, 2), tab_qkv.transpose(1, 2)], dim=2)  # [batch_size, 3 * channels, total_len]
+        # qkv = torch.cat([img_qkv.transpose(1, 2), tab_qkv.transpose(1, 2)], dim=2)  # [batch_size, 3 * channels, total_len]
+        qkv = torch.cat([img_qkv, tab_qkv.unsqueeze(2)], dim=2)  # [batch_size, 3 * channels, seq_len + 1]
 
         # Apply cross-attention
-        image_len = image_token.shape[1]
-        tabular_len = tabular_token.shape[1]
+        image_len = seq_len_image
+        tabular_len = 1
         img_a, tab_a = self.attention(qkv, image_len=image_len, tabular_len=tabular_len)
 
         # Reshape back to original dimensions
@@ -1027,7 +1033,7 @@ class MultimodalUNet(nn.Module):
         tabular = tabular.type(self.dtype)
 
         # Encoder: Process through input blocks
-        for module in self.input_blocks:
+        for m_id, module in enumerate(self.input_blocks):
             image, tabular = module(image, tabular, emb)
             image_hs.append(image)
             tabular_hs.append(tabular)
@@ -1036,7 +1042,7 @@ class MultimodalUNet(nn.Module):
         image, tabular = self.middle_blocks(image, tabular, emb)
 
         # Decoder: Process through output blocks, adding skip connections
-        for module in self.output_blocks:
+        for m_id, module in enumerate(self.output_blocks):
             image = th.cat([image, image_hs.pop()], dim=1)
             tabular = tabular + tabular_hs.pop()  # For tabular data, we sum skip connections
             image, tabular = module(image, tabular, emb)
@@ -1047,53 +1053,6 @@ class MultimodalUNet(nn.Module):
 
         return image, tabular
 
-
-
-import time
-import torch as th
-import torch.nn.functional as F
-from torch import nn
-
-# Import your previously defined classes
-# from your_module import MultimodalUNet, ShapeManager, normalization, zero_module, conv_nd, ... etc.
-
-# Placeholder implementations for undefined components
-# Replace these with your actual implementations
-def normalization(channels):
-    return nn.LayerNorm([channels])
-
-def zero_module(module):
-    nn.init.zeros_(module.weight)
-    if hasattr(module, 'bias') and module.bias is not None:
-        nn.init.zeros_(module.bias)
-    return module
-
-def conv_nd(dims, in_channels, out_channels, kernel_size, stride=1, padding='same', dilation=1):
-    if dims == 1:
-        padding = (kernel_size // 2) if padding == 'same' else padding
-        return nn.Conv1d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, dilation=dilation)
-    elif dims == 2:
-        padding = (kernel_size // 2) if padding == 'same' else padding
-        return nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, dilation=dilation)
-    else:
-        raise NotImplementedError("Only 1D and 2D convolutions are supported.")
-
-class ShapeManager:
-    """
-    Placeholder for ShapeManager.
-    Replace with your actual implementation.
-    """
-    def load_upsample_shape(self, dims):
-        return None
-
-    def save_downsample_shape(self, shape, dims):
-        pass
-
-    def delete_file(self):
-        pass
-
-# Define the MultimodalUNet class as previously adapted
-# Ensure it is imported or defined in your script
 
 if __name__ == '__main__':
     import time
@@ -1107,14 +1066,14 @@ if __name__ == '__main__':
     model_channels = 192
     emb_channels = 128
     image_size = [3, 64, 64]  # Channels, Height, Width for image data
-    tabular_size = [96, 96]    # Channels, Features for tabular data
+    tabular_size = 96          # Number of features in tabular data (2D tensor)
     image_out_channels = 3
-    tabular_out_channels = 96  # Must match the tabular_size channels
+    tabular_out_channels = 96  # Must match the tabular_size
     num_heads = 2
     num_res_blocks = 1
     cross_attention_resolutions = [4, 8, 16]
-    cross_attention_window = [1, 1, 1]
-    cross_attention_shift = False
+    cross_attention_window = [1, 1, 1]  # Not used in current implementation
+    cross_attention_shift = False      # Not used in current implementation
     image_attention_resolutions = [2, 4, 8, 16]
     tabular_attention_resolutions = [2, 4, 8, 16]
     lr = 0.0001
@@ -1150,9 +1109,6 @@ if __name__ == '__main__':
     for name, layer in model.named_modules():
         layer.register_forward_hook(hook_fn)
 
-    # Initialize the ShapeManager
-    shape_manager = ShapeManager()
-
     # Optimizer
     optim = th.optim.SGD(model.parameters(), lr=lr)
 
@@ -1164,7 +1120,7 @@ if __name__ == '__main__':
 
         # Dummy data for image and tabular inputs
         image = th.randn([1, image_size[0], image_size[1], image_size[2]]).to(device)  # [batch, channels, height, width]
-        tabular = th.randn([1, tabular_size[0], tabular_size[1]]).to(device)          # [batch, channels, features]
+        tabular = th.randn([1, tabular_size]).to(device)  # [batch, features]
 
         # Dummy timestep
         timesteps = th.tensor([1], dtype=th.long).to(device)  # [batch]
@@ -1184,4 +1140,5 @@ if __name__ == '__main__':
 
         # Logging
         print(f"Loss: {loss.item():.6f} | Time: {time.time() - time_start:.4f} seconds")
+
 
