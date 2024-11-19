@@ -973,7 +973,7 @@ class MultimodalUNet(nn.Module):
         self.tabular_out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),
-            zero_module(nn.Linear(ch, tabular_out_channels)),
+            zero_module(TabularMLP(ch, tabular_out_channels)),
         )
         self.image_out = nn.Sequential(
             normalization(ch),
@@ -1044,7 +1044,8 @@ class MultimodalUNet(nn.Module):
         # Decoder: Process through output blocks, adding skip connections
         for m_id, module in enumerate(self.output_blocks):
             image = th.cat([image, image_hs.pop()], dim=1)
-            tabular = tabular + tabular_hs.pop()  # For tabular data, we sum skip connections
+            # tabular = tabular + tabular_hs.pop()  # For tabular data, we sum skip connections
+            tabular = th.cat([tabular, tabular_hs.pop()], dim=1)
             image, tabular = module(image, tabular, emb)
 
         # Final output layers for image and tabular data
@@ -1096,18 +1097,18 @@ if __name__ == '__main__':
     ).to(device)
 
     # Define the hook function
-    layer_outputs = {}
-    def hook_fn(module, input, output):
-        if isinstance(output, th.Tensor):
-            layer_outputs[module] = output.shape
-        elif isinstance(output, (list, tuple)):
-            layer_outputs[module] = [o.shape for o in output]
-        else:
-            layer_outputs[module] = 'Non-tensor output'
-
-    # Register hooks for each layer in the model
-    for name, layer in model.named_modules():
-        layer.register_forward_hook(hook_fn)
+    # layer_outputs = {}
+    # def hook_fn(module, input, output):
+    #     if isinstance(output, th.Tensor):
+    #         layer_outputs[module] = output.shape
+    #     elif isinstance(output, (list, tuple)):
+    #         layer_outputs[module] = [o.shape for o in output]
+    #     else:
+    #         layer_outputs[module] = 'Non-tensor output'
+    #
+    # # Register hooks for each layer in the model
+    # for name, layer in model.named_modules():
+    #     layer.register_forward_hook(hook_fn)
 
     # Optimizer
     optim = th.optim.SGD(model.parameters(), lr=lr)
