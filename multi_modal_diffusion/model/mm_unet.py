@@ -1132,6 +1132,8 @@ if __name__ == '__main__':
         # Target data and loss
         image_target = th.randn_like(image_out)
         tabular_target = th.randn_like(tabular_out)
+
+        # TODO: checkout for losses
         loss = F.mse_loss(image_target, image_out) + F.mse_loss(tabular_target, tabular_out)
 
         # Backpropagation
