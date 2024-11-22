@@ -10,9 +10,9 @@ import numpy as np
 import torch as th
 import torch.distributed as dist
 from einops import rearrange, repeat
-from .nn import mean_flat
-from .losses import normal_kl, discretized_gaussian_log_likelihood
-from . import dist_util
+from multi_modal_diffusion.nn import mean_flat
+from multi_modal_diffusion.losses import normal_kl, discretized_gaussian_log_likelihood
+from multi_modal_diffusion import dist_util
 
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):

@@ -3,5 +3,6 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/dataset_management/mimic_cxr_iv_multimodal/PRISMS_dataset_mimic_MedFuse" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/model_garden/latent_diffusion" vcs="Git" />
   </component>
 </project>
