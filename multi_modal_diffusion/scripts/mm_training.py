@@ -39,6 +39,9 @@ def main():
     # args.image_size and args.tabular_size are already in the correct format
     logger.configure(args.output_dir)
 
+    if args.devices is None:
+        args.devices = "cpu"
+
     # Commented out distributed setup
     dist_util.setup_dist(args.devices)
 
@@ -55,7 +58,12 @@ def main():
 
     # Move model to the defined device
     model.to(dist_util.dev())
-    # model.to(device)
+
+    # Wrap model with DistributedDataParallel if using GPUs
+    if dist_util.dev().type == 'cuda' and dist_util.world_size() > 1:
+        model = th.nn.parallel.DistributedDataParallel(
+            model, device_ids=[dist_util.dev()], output_device=dist_util.dev()
+        )
 
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
@@ -101,7 +109,7 @@ def create_argparser():
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=10,
-        devices="cpu",  # This argument is retained but not used
+        devices=None,  # This argument is retained but not used
         save_interval=100,
         output_dir="output",
         resume_checkpoint="",

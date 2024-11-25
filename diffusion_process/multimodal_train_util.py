@@ -69,7 +69,7 @@ class TrainLoop:
         self.save_row = save_row
         self.step = 1
         self.resume_step = 0
-        self.global_batch = self.batch_size * dist.get_world_size()
+        self.global_batch = self.batch_size * dist_util.get_world_size()
 
         self.sync_cuda = th.cuda.is_available()
         self.sample_fn = sample_fn
@@ -113,7 +113,7 @@ class TrainLoop:
             print("******DDP sync model done...")
 
         else:
-            if dist.get_world_size() > 1:
+            if dist_util.get_world_size() > 1:
                 logger.warn(
                     "Distributed training requires CUDA. "
                     "Gradients will not be synchronized properly!"
@@ -344,17 +344,17 @@ class TrainLoop:
 
             sample_image = ((sample_image + 1) * 127.5).clamp(0, 255).to(th.uint8)
 
-            gathered_sample_images = [th.zeros_like(sample_image) for _ in range(dist.get_world_size())]
+            gathered_sample_images = [th.zeros_like(sample_image) for _ in range(dist_util.get_world_size())]
             dist.all_gather(gathered_sample_images, sample_image)
 
             all_images.extend([sample.cpu().numpy() for sample in gathered_sample_images])
 
-            gathered_sample_tabular = [th.zeros_like(sample_tabular) for _ in range(dist.get_world_size())]
+            gathered_sample_tabular = [th.zeros_like(sample_tabular) for _ in range(dist_util.get_world_size())]
             dist.all_gather(gathered_sample_tabular, sample_tabular)
 
             all_tabular.extend([sample.cpu().numpy() for sample in gathered_sample_tabular])
 
-            total_samples += self.batch_size * dist.get_world_size()
+            total_samples += self.batch_size * dist_util.get_world_size()
             if dist.get_rank() == 0:
                 logger.log(f"{total_samples} samples generated.")
 
