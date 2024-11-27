@@ -204,6 +204,8 @@ def main():
     logger.log("Starting training...")
 
     num_epochs = 10
+    eval_interval = 1
+    num_eval_samples = 20
 
     TrainLoop(
         model=model,
@@ -225,6 +227,8 @@ def main():
         lr_anneal_steps=args.lr_anneal_steps,
         class_cond=args.class_cond,
         sample_fn=args.sample_fn,
+        eval_interval=eval_interval,
+        num_eval_samples=num_eval_samples,
     ).run_loop()
 
 

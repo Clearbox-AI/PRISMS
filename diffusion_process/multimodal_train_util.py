@@ -15,6 +15,7 @@ from multi_modal_diffusion.fp16_util import MixedPrecisionTrainer
 from multi_modal_diffusion.nn import update_ema
 from multi_modal_diffusion.resample import LossAwareSampler, UniformSampler
 from diffusion_process.multimodal_dpm_solver_plus import DPM_Solver
+from evaluation_metrics import (compute_mmd_tabular, compute_fid, compute_mmd)
 
 INITIAL_LOG_LOSS_SCALE = 20.0
 
@@ -44,6 +45,8 @@ class TrainLoop:
             sample_fn='dpm_solver',
             num_classes=0,
             save_row=2,
+            eval_interval=1,  # Evaluate every epoch by default
+            num_eval_samples=20
     ):
         self.model = model
         self.diffusion = diffusion
@@ -72,6 +75,8 @@ class TrainLoop:
         self.step = 1
         self.resume_step = 0
         self.global_batch = self.batch_size * dist_util.get_world_size()
+        self.eval_interval = eval_interval
+        self.num_eval_samples = num_eval_samples
 
         self.sync_cuda = th.cuda.is_available()
         self.sample_fn = sample_fn
@@ -234,7 +239,7 @@ class TrainLoop:
                 if self.step % self.save_interval == 0:
                     self.save()
                     # Run for a finite amount of time in integration tests.
-                    output_path = self.save_samples()
+                    self.save_samples()
                     if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                         return
 
@@ -244,7 +249,9 @@ class TrainLoop:
                     logger.log("Reached learning rate annealing steps.")
                     return  # Exit the training loop
 
-            # Optionally, add validation or other epoch-level operations here
+            # evaluation step
+            if (epoch + 1) % self.eval_interval == 0:
+                self.evaluate_model(epoch)
 
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
@@ -259,6 +266,61 @@ class TrainLoop:
         self._anneal_lr()
         self.log_step()
         return loss
+
+
+    def evaluate_model(self, epoch):
+        self.model.eval()  # Set model to evaluation mode
+        with th.no_grad():
+            # Generate samples
+            generated_images, generated_tabular = self.generate_samples(num_samples=20)
+            # Get real samples
+            real_images, real_tabular = self.get_real_samples(num_samples=20)
+            # Compute image metrics
+            fid_score = compute_fid(generated_images, real_images)
+            mmd_score = compute_mmd(generated_images, real_images)
+            logger.logkv("FID Score", fid_score)
+            logger.logkv("MMD Score", mmd_score)
+            # Compute tabular metrics
+            mmd_tabular = compute_mmd_tabular(generated_tabular, real_tabular)
+            logger.logkv("Tabular MMD Score", mmd_tabular)
+            # Optionally, save the metrics to a file or visualize them
+            logger.dumpkvs()
+        self.model.train()  # Set model back to training mode
+
+    def generate_samples(self, num_samples=20):
+        self.model.eval()
+        with th.no_grad():
+            sample_fn = (
+                self.diffusion.p_sample_loop if self.sample_fn != 'ddim' else self.diffusion.ddim_sample_loop
+            )
+            sample = sample_fn(
+                model=self.model,
+                shape={
+                    "image": [num_samples, *self.model.image_size],
+                    "tabular": [num_samples, *self.model.tabular_size]
+                },
+                clip_denoised=True,
+            )
+            generated_images = sample['image']
+            generated_tabular = sample['tabular']
+        self.model.train()
+        return generated_images, generated_tabular
+
+    def get_real_samples(self, num_samples=20):
+        real_images = []
+        real_tabular = []
+        num_collected = 0
+        for batch in self.data:
+            real_images.append(batch['image'])
+            real_tabular.append(batch['tabular'])
+            num_collected += batch['image'].size(0)
+            if num_collected >= num_samples:
+                break
+        real_images = th.cat(real_images, dim=0)[:num_samples]
+        real_tabular = th.cat(real_tabular, dim=0)[:num_samples]
+        return real_images.to(dist_util.dev()), real_tabular.to(dist_util.dev())
+
+
 
 
     def forward_backward(self, batch, cond):
