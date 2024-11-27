@@ -32,6 +32,7 @@ class TrainLoop:
             log_interval,
             save_interval,
             resume_checkpoint,
+            num_epochs,
             lr=0,
             t_lr=1e-4,
             use_fp16=False,
@@ -59,6 +60,7 @@ class TrainLoop:
         self.log_interval = log_interval
         self.save_interval = save_interval
         self.resume_checkpoint = resume_checkpoint
+        self.num_epochs = num_epochs
         self.use_fp16 = use_fp16
         self.fp16_scale_growth = fp16_scale_growth
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
@@ -190,27 +192,60 @@ class TrainLoop:
             )
             self.opt.load_state_dict(state_dict)
 
+    # def run_loop(self):
+    #
+    #     while (
+    #             not self.lr_anneal_steps
+    #             or self.step + self.resume_step < self.lr_anneal_steps
+    #     ):
+    #
+    #         batch = next(self.data)
+    #         loss = self.run_step(batch)
+    #         print(f"loss: {loss}")
+    #
+    #         if self.step % self.log_interval == 0:
+    #             logger.dumpkvs()
+    #
+    #         if self.step % self.save_interval == 0:
+    #             self.save()
+    #             # Run for a finite amount of time in integration tests.
+    #             output_path = self.save_samples()
+    #             if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
+    #                 return
+    #         self.step += 1
+    #     # Save the last checkpoint if it wasn't already saved.
+    #     if (self.step - 1) % self.save_interval != 0:
+    #         self.save()
+
+
     def run_loop(self):
+        for epoch in range(self.num_epochs):
+            logger.log(f"Starting epoch {epoch + 1}/{self.num_epochs}")
+            if isinstance(self.data.sampler, th.utils.data.DistributedSampler):
+                self.data.sampler.set_epoch(epoch)  # For distributed training
 
-        while (
-                not self.lr_anneal_steps
-                or self.step + self.resume_step < self.lr_anneal_steps
-        ):
+            for batch in self.data:
+                loss = self.run_step(batch)
+                print(f"Epoch {epoch + 1}, Step {self.step}, Loss: {loss}")
 
-            batch = next(self.data)
-            loss = self.run_step(batch)
-            print(f"loss: {loss}")
+                if self.step % self.log_interval == 0:
+                    logger.dumpkvs()
 
-            if self.step % self.log_interval == 0:
-                logger.dumpkvs()
+                if self.step % self.save_interval == 0:
+                    self.save()
+                    # Run for a finite amount of time in integration tests.
+                    output_path = self.save_samples()
+                    if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
+                        return
 
-            if self.step % self.save_interval == 0:
-                self.save()
-                # Run for a finite amount of time in integration tests.
-                output_path = self.save_samples()
-                if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
-                    return
-            self.step += 1
+                self.step += 1
+
+                if self.lr_anneal_steps and self.step + self.resume_step >= self.lr_anneal_steps:
+                    logger.log("Reached learning rate annealing steps.")
+                    return  # Exit the training loop
+
+            # Optionally, add validation or other epoch-level operations here
+
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
@@ -224,6 +259,7 @@ class TrainLoop:
         self._anneal_lr()
         self.log_step()
         return loss
+
 
     def forward_backward(self, batch, cond):
         batch = {k: v.to(dist_util.dev()) for k, v in batch.items()}
