@@ -108,16 +108,18 @@ class TrainLoop:
         self.output_model_stastics()
 
         if th.cuda.is_available():
-            self.use_ddp = True
-            self.ddp_model = DDP(
-                self.model,
-                device_ids=[dist_util.dev()],
-                output_device=dist_util.dev(),
-                broadcast_buffers=False,
-                bucket_cap_mb=128,
-                find_unused_parameters=False,
-            )
-            print("******DDP sync model done...")
+            self.use_ddp = False
+            self.ddp_model = self.model
+            #self.use_ddp = True
+            #self.ddp_model = DDP(
+            #    self.model,
+            #    device_ids=[dist_util.dev()],
+            #    output_device=dist_util.dev(),
+            #    broadcast_buffers=False,
+            #    bucket_cap_mb=128,
+            #    find_unused_parameters=False,
+            #)
+            #print("******DDP sync model done...")
 
         else:
             if dist_util.get_world_size() > 1:

@@ -194,7 +194,7 @@ def main():
     model.to(dist_util.dev())
 
     # Wrap model with DistributedDataParallel if using GPUs
-    if dist_util.dev().type == 'cuda' and dist_util.world_size() > 1:
+    if dist_util.dev().type == 'cuda' and dist_util.get_world_size() > 1:
         model = th.nn.parallel.DistributedDataParallel(
             model, device_ids=[dist_util.dev()], output_device=dist_util.dev()
         )
