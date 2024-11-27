@@ -15,7 +15,7 @@ from multi_modal_diffusion.fp16_util import MixedPrecisionTrainer
 from multi_modal_diffusion.nn import update_ema
 from multi_modal_diffusion.resample import LossAwareSampler, UniformSampler
 from diffusion_process.multimodal_dpm_solver_plus import DPM_Solver
-from evaluation_metrics import (compute_mmd_tabular, compute_fid, compute_mmd)
+from diffusion_process.evaluation_metrics import (compute_mmd_tabular, compute_fid, compute_mmd)
 
 INITIAL_LOG_LOSS_SCALE = 20.0
 

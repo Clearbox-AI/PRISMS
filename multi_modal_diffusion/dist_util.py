@@ -141,7 +141,8 @@ def setup_dist(devices=None):
         # We are in a distributed setting
         _global_rank = int(os.environ['RANK'])
         _global_world_size = int(os.environ['WORLD_SIZE'])
-        _global_device = th.device(f"cuda:{_global_rank % num_gpus}")
+        device_index = _global_rank % num_gpus
+        _global_device = th.device(f"cuda:{device_index}")
         th.cuda.set_device(_global_device)
 
         backend = "nccl" if th.cuda.is_available() else "gloo"
@@ -150,9 +151,11 @@ def setup_dist(devices=None):
         # Single process
         _global_rank = 0
         _global_world_size = 1
-        _global_device = th.device("cuda" if th.cuda.is_available() else "cpu")
         if th.cuda.is_available():
+            _global_device = th.device("cuda:0")  # Ensure device has index 0
             th.cuda.set_device(_global_device)
+        else:
+            _global_device = th.device("cpu")
 
 def dev():
     """
@@ -160,7 +163,10 @@ def dev():
     """
     global _global_device
     if _global_device is None:
-        _global_device = th.device("cuda" if th.cuda.is_available() else "cpu")
+        if th.cuda.is_available():
+            _global_device = th.device("cuda:0")
+        else:
+            _global_device = th.device("cpu")
     return _global_device
 
 def rank():
