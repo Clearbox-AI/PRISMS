@@ -5,25 +5,38 @@ from multi_modal_diffusion import dist_util
 
 #  FOR IMAGE
 
-def compute_fid( generated_images, real_images):
-    # Ensure images are in the range [0, 1]
-    generated_images = (generated_images + 1) / 2  # Assuming original range is [-1, 1]
-    real_images = (real_images + 1) / 2
+# def compute_fid( generated_images, real_images):
+#     # Ensure images are in the range [0, 1]
+#     generated_images = (generated_images + 1) / 2  # Assuming original range is [-1, 1]
+#     real_images = (real_images + 1) / 2
+#
+#     # Handle grayscale images by repeating channels
+#     if generated_images.shape[1] == 1:
+#         generated_images = generated_images.repeat(1, 3, 1, 1)
+#     if real_images.shape[1] == 1:
+#         real_images = real_images.repeat(1, 3, 1, 1)
+#
+#     # Resize images to 299x299 (required by Inception network)
+#     generated_images = th.nn.functional.interpolate(generated_images, size=(299, 299), mode='bilinear')
+#     real_images = th.nn.functional.interpolate(real_images, size=(299, 299), mode='bilinear')
+#
+#     # Initialize FID metric
+#     fid = FrechetInceptionDistance(feature=2048).to(dist_util.dev())
+#
+#     # Update FID with real and generated images
+#     fid.update(real_images, real=True)
+#     fid.update(generated_images, real=False)
+#
+#     # Compute FID score
+#     fid_score = fid.compute()
+#     return fid_score.item()
 
-    # Handle grayscale images by repeating channels
-    if generated_images.shape[1] == 1:
-        generated_images = generated_images.repeat(1, 3, 1, 1)
-    if real_images.shape[1] == 1:
-        real_images = real_images.repeat(1, 3, 1, 1)
-
-    # Resize images to 299x299 (required by Inception network)
-    generated_images = th.nn.functional.interpolate(generated_images, size=(299, 299), mode='bilinear')
-    real_images = th.nn.functional.interpolate(real_images, size=(299, 299), mode='bilinear')
+def compute_fid(generated_images, real_images):
 
     # Initialize FID metric
-    fid = FrechetInceptionDistance(feature=2048).to(dist_util.dev())
+    fid = FrechetInceptionDistance(feature=2048)
 
-    # Update FID with real and generated images
+    # Update with real and generated images
     fid.update(real_images, real=True)
     fid.update(generated_images, real=False)
 
