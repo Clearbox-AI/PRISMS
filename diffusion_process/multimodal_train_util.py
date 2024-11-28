@@ -168,7 +168,7 @@ class TrainLoop:
             state_dict = dist_util.load_state_dict(resume_checkpoint, map_location=dist_util.dev())
             self.pre_load_params = state_dict.keys()
             logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
-            self.model.load_state_dict_(state_dict)
+            self.model.load_state_dict(state_dict)
 
         dist_util.sync_params(self.model.parameters())
 
@@ -298,8 +298,8 @@ class TrainLoop:
             sample = sample_fn(
                 model=self.model,
                 shape={
-                    "image": [num_samples, *self.model.image_size],
-                    "tabular": [num_samples, *self.model.tabular_size]
+                    "image": [num_samples, *self.model.module.image_size],
+                    "tabular": [num_samples, self.model.module.tabular_size]
                 },
                 clip_denoised=True,
             )
