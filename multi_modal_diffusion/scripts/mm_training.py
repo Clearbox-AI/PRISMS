@@ -49,6 +49,7 @@ class ImageTabularDataset(Dataset):
     def __getitem__(self, idx):
         patient_dir = self.patient_dirs[idx]
 
+        # IMAGE PART
         # Find image file
         image_files = glob(os.path.join(patient_dir, '*.npy'))
         if not image_files:
@@ -57,8 +58,29 @@ class ImageTabularDataset(Dataset):
         image = np.load(image_path).astype(np.float32)  # Shape: [H, W]
 
         # Resize image to the desired size
-        image = self.resize_image(image, self.image_size)  # Now shape is [H, W]
+        image = self.resize_image(image, self.image_size)
 
+        # TODO: check for all possibilities
+        # Convert image to 3 channels
+        if image.ndim == 2:
+            # Duplicate the single channel to create a 3-channel image
+            image = np.stack([image] * 3, axis=-1)  # Shape: [H, W, 3]
+        elif image.shape[2] == 1:
+            # If image has a singleton channel dimension
+            image = np.concatenate([image] * 3, axis=2)  # Shape: [H, W, 3]
+        elif image.shape[2] != 3:
+            raise ValueError(f"Unexpected number of channels in image: {image.shape[2]}")
+
+        # Normalize image data
+        image = (image - self.image_mean) / self.image_std  # Now shape is [H, W, 3]
+
+        # Transpose image to [C, H, W] for PyTorch
+        image = np.transpose(image, (2, 0, 1))  # Shape: [3, H, W]
+
+        # Convert to torch tensors
+        image = th.from_numpy(image)  # Shape: [3, H, W]
+
+        # TABULAR PART
         # Find JSON file
         json_files = glob(os.path.join(patient_dir, '*.json'))
         if not json_files:
@@ -77,16 +99,8 @@ class ImageTabularDataset(Dataset):
         # Normalize tabular data
         tabular_data = (tabular_data - self.tabular_mean) / self.tabular_std
 
-        # Normalize image data
-        image = (image - self.image_mean) / self.image_std
-
-        # Convert to torch tensors
-        image = th.from_numpy(image)  # Shape: [H, W]
+        # Convert tabular data to torch tensor
         tabular_data = th.from_numpy(tabular_data)
-
-        # Add channel dimension to image if necessary
-        if image.dim() == 2:
-            image = image.unsqueeze(0)  # Shape: [1, H, W]
 
         return {'image': image, 'tabular': tabular_data}
 
@@ -100,7 +114,7 @@ class ImageTabularDataset(Dataset):
         return image_resized
 
     def compute_tabular_normalization(self):
-        # [Same as before]
+
         # Collect all tabular data
         all_tabular_data = []
         for patient_dir in self.patient_dirs:
@@ -123,6 +137,7 @@ class ImageTabularDataset(Dataset):
         return mean, std
 
     def compute_image_normalization(self):
+
         # Collect all image data
         all_image_pixels = []
         for patient_dir in self.patient_dirs:
@@ -131,18 +146,23 @@ class ImageTabularDataset(Dataset):
                 continue
             image_path = image_files[0]
             image = np.load(image_path).astype(np.float32)
-            if image.shape != (256,256):
-                pass
             # Resize image
             image = self.resize_image(image, self.image_size)
-            all_image_pixels.append(image.flatten())
+            # Convert to 3 channels
+            if image.ndim == 2:
+                image = np.stack([image] * 3, axis=-1)  # Shape: [H, W, 3]
+            elif image.shape[2] == 1:
+                image = np.concatenate([image] * 3, axis=2)  # Shape: [H, W, 3]
+            elif image.shape[2] != 3:
+                raise ValueError(f"Unexpected number of channels in image: {image.shape[2]}")
+            all_image_pixels.append(image.reshape(-1, 3))  # Shape: [num_pixels, 3]
         if not all_image_pixels:
             raise ValueError("No image data found in any patient directories.")
-        all_image_pixels = np.concatenate(all_image_pixels, axis=0)
-        mean = np.mean(all_image_pixels)
-        std = np.std(all_image_pixels)
-        if std == 0:
-            std = 1.0  # Prevent division by zero
+        all_image_pixels = np.concatenate(all_image_pixels, axis=0)  # Shape: [total_pixels, 3]
+        mean = np.mean(all_image_pixels, axis=0)  # Mean per channel
+        std = np.std(all_image_pixels, axis=0)  # Std per channel
+        # Prevent division by zero
+        std[std == 0] = 1.0
         return mean, std
 
 def load_training_data(args):
