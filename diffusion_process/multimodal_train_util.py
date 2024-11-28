@@ -415,8 +415,8 @@ class TrainLoop:
                     alphas_cumprod=th.tensor(self.diffusion.alphas_cumprod)
                 )
                 x_T = {
-                    "image": th.randn([self.batch_size, *self.model.image_size]).to(dist_util.dev()),
-                    "tabular": th.randn([self.batch_size, *self.model.tabular_size]).to(dist_util.dev())
+                    "image": th.randn([self.batch_size, *self.model.module.image_size]).to(dist_util.dev()),
+                    "tabular": th.randn([self.batch_size, *self.model.module.tabular_size]).to(dist_util.dev())
                 }
                 sample = dpm_solver.sample(
                     x_T,
@@ -432,8 +432,8 @@ class TrainLoop:
                 sample = sample_fn(
                     model=self.model,
                     shape={
-                        "image": [self.batch_size, *self.model.image_size],
-                        "tabular": [self.batch_size, *self.model.tabular_size]
+                        "image": [self.batch_size, *self.model.module.image_size],
+                        "tabular": [self.batch_size, *self.model.module.tabular_size]
                     },
                     clip_denoised=True,
                     model_kwargs=model_kwargs,
@@ -444,17 +444,25 @@ class TrainLoop:
 
             sample_image = ((sample_image + 1) * 127.5).clamp(0, 255).to(th.uint8)
 
-            gathered_sample_images = [th.zeros_like(sample_image) for _ in range(dist_util.get_world_size())]
-            dist.all_gather(gathered_sample_images, sample_image)
+            if dist_util.is_distributed():
+                gathered_sample_images = [th.zeros_like(sample_image) for _ in range(dist_util.world_size())]
+                dist.all_gather(gathered_sample_images, sample_image)
+            else:
+                gathered_sample_images = [sample_image]
 
             all_images.extend([sample.cpu().numpy() for sample in gathered_sample_images])
 
-            gathered_sample_tabular = [th.zeros_like(sample_tabular) for _ in range(dist_util.get_world_size())]
-            dist.all_gather(gathered_sample_tabular, sample_tabular)
+            if dist_util.is_distributed():
+                gathered_sample_tabular = [th.zeros_like(sample_tabular) for _ in range(dist_util.get_world_size())]
+                dist.all_gather(gathered_sample_tabular, sample_tabular)
+            else:
+                gathered_sample_tabular = [sample_tabular]
 
             all_tabular.extend([sample.cpu().numpy() for sample in gathered_sample_tabular])
 
-            total_samples += self.batch_size * dist_util.get_world_size()
+            # total_samples += self.batch_size * dist_util.get_world_size()
+            total_samples += self.batch_size * (dist_util.world_size() if dist_util.is_distributed() else 1)
+
             if dist.get_rank() == 0:
                 logger.log(f"{total_samples} samples generated.")
 
@@ -470,7 +478,8 @@ class TrainLoop:
             # Save tabular data
             np.save(os.path.join(logger.get_dir(), f"sample_tabular.npy"), all_tabular)
 
-        dist.barrier()
+        if dist_util.is_distributed():
+            dist.barrier()
 
         # Restore original model parameters
         state_dict = self.mp_trainer.master_params_to_state_dict(self.mp_trainer.master_params)
@@ -481,7 +490,7 @@ class TrainLoop:
     def save(self):
         def save_checkpoint(rate, params):
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
-            if dist.get_rank() == 0:
+            if dist_util.rank() == 0:
                 logger.log(f"saving model {rate}...")
                 if not rate:
                     filename = f"model{(self.step + self.resume_step):06d}.pt"
@@ -494,7 +503,7 @@ class TrainLoop:
         for rate, params in zip(self.ema_rate, self.ema_params):
             save_checkpoint(rate, params)
 
-        if dist.get_rank() == 0:
+        if dist_util.rank() == 0:
             with open(
                     os.path.join(get_blob_logdir(), f"opt{(self.step + self.resume_step):06d}.pt"),
                     "wb",
