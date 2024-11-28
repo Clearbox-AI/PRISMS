@@ -279,17 +279,55 @@ class TrainLoop:
             generated_images, generated_tabular = self.generate_samples(num_samples=20)
             # Get real samples
             real_images, real_tabular = self.get_real_samples(num_samples=20)
+
+            # Postprocess images
+            processed_generated_images = self.postprocess_images(generated_images)
+            processed_real_images = self.postprocess_images(real_images)
+
             # Compute image metrics
-            fid_score = compute_fid(generated_images, real_images)
+            # Compute FID
+            fid_score = compute_fid(processed_generated_images, processed_real_images)
+            # Compute MMD
             mmd_score = compute_mmd(generated_images, real_images)
             logger.logkv("FID Score", fid_score)
             logger.logkv("MMD Score", mmd_score)
+
             # Compute tabular metrics
             mmd_tabular = compute_mmd_tabular(generated_tabular, real_tabular)
             logger.logkv("Tabular MMD Score", mmd_tabular)
             # Optionally, save the metrics to a file or visualize them
             logger.dumpkvs()
         self.model.train()  # Set model back to training mode
+
+    def postprocess_images(self, images):
+        # Move images to CPU and detach from computation graph
+        images = images.detach().cpu()
+
+        # Flatten the images to compute global min and max
+        min_val = images.min()
+        max_val = images.max()
+
+        # Handle different possible ranges
+        if min_val >= -1.0 and max_val <= 1.0:
+            # Images are in [-1, 1], scale to [0, 1]
+            images = (images + 1.0) / 2.0
+        elif min_val >= 0.0 and max_val <= 1.0:
+            # Images are already in [0, 1], no scaling needed
+            pass
+        else:
+            # Images are in an arbitrary range, scale to [0, 1]
+            images = (images - min_val) / (max_val - min_val)
+
+        # Ensure images are in [0, 1]
+        images = images.clamp(0, 1)
+
+        # Scale images to [0, 255]
+        images = (images * 255.0).clamp(0, 255)
+
+        # Convert to uint8
+        images = images.type(th.uint8)
+
+        return images
 
     def generate_samples(self, num_samples=20):
         self.model.eval()

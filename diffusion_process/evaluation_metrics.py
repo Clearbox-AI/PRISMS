@@ -41,27 +41,60 @@ def polynomial_kernel(X, Y=None, degree=3, gamma=None, coef0=1):
     return K
 
 
-def compute_mmd(X, Y):
-    m = X.shape[0]
-    n = Y.shape[0]
+# def compute_mmd(X, Y):
+#     m = X.shape[0]
+#     n = Y.shape[0]
+#
+#     # Flatten images
+#     X = X.view(m, -1)
+#     Y = Y.view(n, -1)
+#
+#     # Compute kernels
+#     K_XX = polynomial_kernel(X)
+#     K_YY = polynomial_kernel(Y)
+#     K_XY = polynomial_kernel(X, Y)
+#
+#     # Compute MMD
+#     K_XX_sum = (K_XX.sum() - K_XX.diag().sum()) / (m * (m - 1))
+#     K_YY_sum = (K_YY.sum() - K_YY.diag().sum()) / (n * (n - 1))
+#     K_XY_sum = K_XY.sum() / (m * n)
+#
+#     mmd = K_XX_sum + K_YY_sum - 2 * K_XY_sum
+#
+#     return mmd.item()
 
-    # Flatten images
-    X = X.view(m, -1)
-    Y = Y.view(n, -1)
+def compute_mmd(generated_images, real_images):
+    # Ensure images are of shape [N, C, H, W]
+    assert generated_images.shape == real_images.shape, "Generated and real images must have the same shape"
 
-    # Compute kernels
-    K_XX = polynomial_kernel(X)
-    K_YY = polynomial_kernel(Y)
-    K_XY = polynomial_kernel(X, Y)
+    # Flatten images if required
+    N = generated_images.size(0)
+    generated_images_flat = generated_images.view(N, -1)
+    real_images_flat = real_images.view(N, -1)
 
-    # Compute MMD
-    K_XX_sum = (K_XX.sum() - K_XX.diag().sum()) / (m * (m - 1))
-    K_YY_sum = (K_YY.sum() - K_YY.diag().sum()) / (n * (n - 1))
-    K_XY_sum = K_XY.sum() / (m * n)
+    # Compute MMD using a Gaussian kernel
+    mmd_value = mmd_rbf(generated_images_flat, real_images_flat)
+    return mmd_value.item()
 
-    mmd = K_XX_sum + K_YY_sum - 2 * K_XY_sum
 
-    return mmd.item()
+def mmd_rbf(X, Y, sigma=1.0):
+    XX = th.matmul(X, X.t())
+    YY = th.matmul(Y, Y.t())
+    XY = th.matmul(X, Y.t())
+
+    rx = (XX.diag().unsqueeze(0).expand_as(XX))
+    ry = (YY.diag().unsqueeze(0).expand_as(YY))
+
+    K = th.exp(- (rx.t() + rx - 2 * XX) / (2 * sigma ** 2))
+    L = th.exp(- (ry.t() + ry - 2 * YY) / (2 * sigma ** 2))
+    P = th.exp(- (rx.t() + ry - 2 * XY) / (2 * sigma ** 2))
+
+    beta = 1. / (X.size(0) * X.size(0))
+    gamma = 1. / (Y.size(0) * Y.size(0))
+    delta = 2. / (X.size(0) * Y.size(0))
+
+    mmd = beta * K.sum() + gamma * L.sum() - delta * P.sum()
+    return mmd
 
 
 #  FOR TABULAR
