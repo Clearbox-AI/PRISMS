@@ -144,6 +144,7 @@ def setup_dist(devices=None):
         device_index = _global_rank % num_gpus
         _global_device = th.device(f"cuda:{device_index}")
         th.cuda.set_device(_global_device)
+        print(f"Process {_global_rank} using device {_global_device}")
 
         backend = "nccl" if th.cuda.is_available() else "gloo"
         dist.init_process_group(backend=backend, init_method='env://')

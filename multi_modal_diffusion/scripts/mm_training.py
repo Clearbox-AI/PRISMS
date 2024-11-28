@@ -146,7 +146,7 @@ class ImageTabularDataset(Dataset):
         return mean, std
 
 def load_training_data(args):
-    dataset = ImageTabularDataset(args.data_dir, image_size=(256, 256))
+    dataset = ImageTabularDataset(args.data_dir, image_size=(64, 64))
     sampler = DistributedSampler(dataset) if dist_util.get_world_size() > 1 else None
     data_loader = th.utils.data.DataLoader(
         dataset,
@@ -196,7 +196,8 @@ def main():
     # Wrap model with DistributedDataParallel if using GPUs
     if dist_util.dev().type == 'cuda' and dist_util.get_world_size() > 1:
         model = th.nn.parallel.DistributedDataParallel(
-            model, device_ids=[dist_util.dev()], output_device=dist_util.dev()
+            model, device_ids=[dist_util.dev()], output_device=dist_util.dev(),
+            find_unused_parameters=True
         )
 
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
