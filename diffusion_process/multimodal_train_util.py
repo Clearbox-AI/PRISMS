@@ -255,8 +255,8 @@ class TrainLoop:
 
             # TODO: fix evaluation
             # evaluation step
-            # if (epoch + 1) % self.eval_interval == 0:
-            #     self.evaluate_model(epoch)
+            if (epoch + 1) % self.eval_interval == 0:
+                self.evaluate_model(epoch)
 
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
@@ -277,9 +277,9 @@ class TrainLoop:
         self.model.eval()  # Set model to evaluation mode
         with th.no_grad():
             # Generate samples
-            generated_images, generated_tabular = self.generate_samples(num_samples=20)
+            generated_images, generated_tabular = self.generate_samples(num_samples=self.num_eval_samples)
             # Get real samples
-            real_images, real_tabular = self.get_real_samples(num_samples=20)
+            real_images, real_tabular = self.get_real_samples(num_samples=self.num_eval_samples)
 
             # Postprocess images
             processed_generated_images = self.postprocess_images(generated_images)
@@ -301,8 +301,8 @@ class TrainLoop:
         self.model.train()  # Set model back to training mode
 
     def postprocess_images(self, images):
-        # Move images to CPU and detach from computation graph
-        images = images.detach().cpu()
+        # Detach from computation graph
+        images = images.detach()
 
         # Flatten the images to compute global min and max
         min_val = images.min()
@@ -327,6 +327,9 @@ class TrainLoop:
 
         # Convert to uint8
         images = images.type(th.uint8)
+
+        # Ensure images are on the same device as the metric (GPU)
+        images = images.to(dist_util.dev())
 
         return images
 

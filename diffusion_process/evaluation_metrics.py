@@ -33,8 +33,11 @@ from multi_modal_diffusion import dist_util
 
 def compute_fid(generated_images, real_images):
 
-    # Initialize FID metric
-    fid = FrechetInceptionDistance(feature=2048)
+    # Ensure images are on the same device
+    device = generated_images.device
+
+    # Initialize FID metric on the correct device and disable synchronization
+    fid = FrechetInceptionDistance(feature=2048, dist_sync_on_compute=False).to(device)
 
     # Update with real and generated images
     fid.update(real_images, real=True)
