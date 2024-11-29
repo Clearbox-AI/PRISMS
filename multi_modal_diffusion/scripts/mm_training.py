@@ -25,6 +25,7 @@ from diffusion_process.multimodal_script_util import (
 from diffusion_process.multimodal_train_util import TrainLoop
 from multi_modal_diffusion.common import set_seed_logger_random
 from torch.utils.data.distributed import DistributedSampler
+from sklearn.preprocessing import StandardScaler
 
 
 class ImageTabularDataset(Dataset):
@@ -39,8 +40,12 @@ class ImageTabularDataset(Dataset):
         if not self.patient_dirs:
             raise ValueError(f"No patient directories found in {data_dir}")
 
+        # Initialize StandardScaler for tabular data
+        self.tabular_scaler = StandardScaler()
+
         # Compute normalization parameters
-        self.tabular_mean, self.tabular_std = self.compute_tabular_normalization()
+        # self.tabular_mean, self.tabular_std = self.compute_tabular_normalization()
+        self.compute_tabular_normalization()
         self.image_mean, self.image_std = self.compute_image_normalization()
 
     def __len__(self):
@@ -94,10 +99,12 @@ class ImageTabularDataset(Dataset):
         tabular_data = json_data.get('patient_id', list(json_data.values())[0])
         if not tabular_data:
             raise ValueError(f"No tabular data found in {json_path}")
-        tabular_data = np.array(tabular_data, dtype=np.float32)
+        # tabular_data = np.array(tabular_data, dtype=np.float32)
+        tabular_data = np.array(tabular_data, dtype=np.float32).reshape(1, -1)
 
         # Normalize tabular data
-        tabular_data = (tabular_data - self.tabular_mean) / self.tabular_std
+        # tabular_data = (tabular_data - self.tabular_mean) / self.tabular_std
+        tabular_data = self.tabular_scaler.transform(tabular_data).flatten()
 
         # Convert tabular data to torch tensor
         tabular_data = th.from_numpy(tabular_data)
@@ -116,6 +123,27 @@ class ImageTabularDataset(Dataset):
     def compute_tabular_normalization(self):
 
         # Collect all tabular data
+        # all_tabular_data = []
+        # for patient_dir in self.patient_dirs:
+        #     json_files = glob(os.path.join(patient_dir, '*.json'))
+        #     if not json_files:
+        #         continue
+        #     json_path = json_files[0]
+        #     with open(json_path, 'r') as f:
+        #         json_data = json.load(f)
+        #     tabular_data = json_data.get('patient_id', list(json_data.values())[0])
+        #     if not tabular_data:
+        #         continue
+        #     all_tabular_data.append(tabular_data)
+        # if not all_tabular_data:
+        #     raise ValueError("No tabular data found in any patient directories.")
+        # all_tabular_data = np.array(all_tabular_data, dtype=np.float32)
+        # mean = np.mean(all_tabular_data, axis=0)
+        # std = np.std(all_tabular_data, axis=0)
+        # std[std == 0] = 1.0  # Prevent division by zero
+        # return mean, std
+
+        # Collect all tabular data
         all_tabular_data = []
         for patient_dir in self.patient_dirs:
             json_files = glob(os.path.join(patient_dir, '*.json'))
@@ -131,10 +159,9 @@ class ImageTabularDataset(Dataset):
         if not all_tabular_data:
             raise ValueError("No tabular data found in any patient directories.")
         all_tabular_data = np.array(all_tabular_data, dtype=np.float32)
-        mean = np.mean(all_tabular_data, axis=0)
-        std = np.std(all_tabular_data, axis=0)
-        std[std == 0] = 1.0  # Prevent division by zero
-        return mean, std
+
+        # Fit the StandardScaler on the collected tabular data
+        self.tabular_scaler.fit(all_tabular_data)
 
     def compute_image_normalization(self):
 
