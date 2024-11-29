@@ -3,7 +3,7 @@ This code is adapted from guided_diffusion:
 https://github.com/openai/guided-diffusion/blob/main/guided_diffusion/gaussian_diffusion.py
 Modified for image and tabular multimodal diffusion.
 """
-
+from multi_modal_diffusion import logger
 import enum
 import math
 import numpy as np
