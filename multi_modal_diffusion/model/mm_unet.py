@@ -377,7 +377,8 @@ class ResBlock(TimestepBlock):
             normalization(self.out_channels),
             nn.SiLU(),
             nn.Dropout(p=dropout),
-            zero_module(nn.Linear(self.out_channels, self.out_channels))
+            # zero_module(nn.Linear(self.out_channels, self.out_channels))
+            nn.Linear(self.out_channels, self.out_channels)
         )
 
         # Skip connections
@@ -714,7 +715,8 @@ class CrossAttentionBlock(nn.Module):
         # self.img_proj_out = zero_module(nn.Linear(self.channels, self.channels))
         # TODO: check for initialization instead of zero_module (eg. Kaiming initialization for convolutional layers)
         self.img_proj_out = zero_module(ImageConv(self.channels, self.channels, kernel_size=1))
-        self.tab_proj_out = zero_module(TabularMLP(self.channels, self.channels))
+        # self.tab_proj_out = zero_module(TabularMLP(self.channels, self.channels))
+        self.tab_proj_out = TabularMLP(self.channels, self.channels)
 
     def forward(self, image, tabular):
         return checkpoint(self._forward, (image, tabular), self.parameters(), self.use_checkpoint)
@@ -973,7 +975,8 @@ class MultimodalUNet(nn.Module):
         self.tabular_out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),
-            zero_module(TabularMLP(ch, tabular_out_channels)),
+            # zero_module(TabularMLP(ch, tabular_out_channels)),
+            TabularMLP(ch, tabular_out_channels)
         )
         self.image_out = nn.Sequential(
             normalization(ch),
@@ -1055,26 +1058,27 @@ class MultimodalUNet(nn.Module):
         return image, tabular
 
 
+
+
 if __name__ == '__main__':
+
+    from torch.utils.data import DataLoader
+    from multi_modal_diffusion.scripts.mm_training import ImageTabularDataset
     import time
-    import torch as th
-    import torch.nn.functional as F
 
     # Set device
-    device = th.device("cuda" if th.cuda.is_available() else "cpu")
+    device = th.device('cpu')  # Using CPU
 
     # Model configuration parameters
     model_channels = 192
     emb_channels = 128
     image_size = [3, 64, 64]  # Channels, Height, Width for image data
-    tabular_size = 96          # Number of features in tabular data (2D tensor)
+    tabular_size = 174          # Number of features in tabular data (1D tensor)
     image_out_channels = 3
-    tabular_out_channels = 96  # Must match the tabular_size
+    tabular_out_channels = 174  # Must match the tabular_size
     num_heads = 2
     num_res_blocks = 1
     cross_attention_resolutions = [4, 8, 16]
-    cross_attention_window = [1, 1, 1]  # Not used in current implementation
-    cross_attention_shift = False      # Not used in current implementation
     image_attention_resolutions = [2, 4, 8, 16]
     tabular_attention_resolutions = [2, 4, 8, 16]
     lr = 0.0001
@@ -1096,52 +1100,54 @@ if __name__ == '__main__':
         use_checkpoint=True
     ).to(device)
 
-    # Define the hook function
-    # layer_outputs = {}
-    # def hook_fn(module, input, output):
-    #     if isinstance(output, th.Tensor):
-    #         layer_outputs[module] = output.shape
-    #     elif isinstance(output, (list, tuple)):
-    #         layer_outputs[module] = [o.shape for o in output]
-    #     else:
-    #         layer_outputs[module] = 'Non-tensor output'
-    #
-    # # Register hooks for each layer in the model
-    # for name, layer in model.named_modules():
-    #     layer.register_forward_hook(hook_fn)
-
     # Optimizer
     optim = th.optim.SGD(model.parameters(), lr=lr)
+
+    # Data loading parameters
+    data_dir = r'D:\clearboxAI\NACC\extracted_dataset'  # Replace with the actual data directory
+    batch_size = 1  # Adjust as needed
+    num_workers = 0  # Number of subprocesses to use for data loading
+
+    # Create dataset and data loader
+    dataset = ImageTabularDataset(data_dir, image_size=(64, 64))
+    data_loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
 
     # Training loop
     model.train()
     while True:
-        # Record the start time
-        time_start = time.time()
+        for batch in data_loader:
+            # Record the start time
+            time_start = time.time()
 
-        # Dummy data for image and tabular inputs
-        image = th.randn([1, image_size[0], image_size[1], image_size[2]]).to(device)  # [batch, channels, height, width]
-        tabular = th.randn([1, tabular_size]).to(device)  # [batch, features]
+            # Extract image and tabular data, and move to device
+            image = batch['image'].to(device)  # [batch_size, channels, height, width]
+            tabular = batch['tabular'].to(device)  # [batch_size, features]
 
-        # Dummy timestep
-        timesteps = th.tensor([1], dtype=th.long).to(device)  # [batch]
+            # Define timesteps (using a dummy value of 1)
+            timesteps = th.ones(image.size(0), dtype=th.long).to(device)
 
-        # Forward pass
-        image_out, tabular_out = model(image, tabular, timesteps)
+            # Forward pass
+            image_out, tabular_out = model(image, tabular, timesteps)
 
-        # Target data and loss
-        image_target = th.randn_like(image_out)
-        tabular_target = th.randn_like(tabular_out)
+            # Use the inputs as targets (autoencoder-like setup)
+            image_target = image
+            tabular_target = tabular
 
-        # TODO: checkout for losses
-        loss = F.mse_loss(image_target, image_out) + F.mse_loss(tabular_target, tabular_out)
+            # Compute loss
+            loss = F.mse_loss(image_out, image_target) + F.mse_loss(tabular_out, tabular_target)
 
-        # Backpropagation
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
+            # Backpropagation
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
 
-        # Logging
-        print(f"Loss: {loss.item():.6f} | Time: {time.time() - time_start:.4f} seconds")
-
+            # Logging
+            print(f"Loss: {loss.item():.6f} | Time: {time.time() - time_start:.4f} seconds")
 

@@ -3,7 +3,7 @@ This code is adapted from guided_diffusion:
 https://github.com/openai/guided-diffusion/blob/main/guided_diffusion/gaussian_diffusion.py
 Modified for image and tabular multimodal diffusion.
 """
-from multi_modal_diffusion import logger
+
 import enum
 import math
 import numpy as np
@@ -1195,7 +1195,6 @@ class GaussianDiffusion:
 
         image_output, tabular_output = model(image_t, tabular_t, self._scale_timesteps(t), **model_kwargs)
 
-        logger.logkv("step", tabular_output)
         image_loss = {}
         tabular_loss = {}
         if self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
