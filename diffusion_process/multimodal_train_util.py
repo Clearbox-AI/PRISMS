@@ -254,7 +254,6 @@ class TrainLoop:
                     logger.log("Reached learning rate annealing steps.")
                     return  # Exit the training loop
 
-            # TODO: fix evaluation
             # evaluation step
             if (epoch + 1) % self.eval_interval == 0:
                 self.evaluate_model(epoch)

@@ -37,7 +37,7 @@ def compute_fid(generated_images, real_images):
     device = generated_images.device
 
     # Initialize FID metric on the correct device and disable synchronization
-    fid = FrechetInceptionDistance(feature=2048, dist_sync_on_compute=False).to(device)
+    fid = FrechetInceptionDistance(feature=2048).to(device)
 
     # Update with real and generated images
     fid.update(real_images, real=True)

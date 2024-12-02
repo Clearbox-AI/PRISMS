@@ -13,6 +13,7 @@ import tempfile
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
+import csv
 
 DEBUG = 10
 INFO = 20
@@ -110,37 +111,90 @@ class JSONOutputFormat(KVWriter):
         self.file.close()
 
 
+# class CSVOutputFormat(KVWriter):
+#     def __init__(self, filename):
+#         self.file = open(filename, "w+t")
+#         self.keys = []
+#         self.sep = ","
+#
+#     def writekvs(self, kvs):
+#         # Add our current row to the history
+#         extra_keys = list(kvs.keys() - self.keys)
+#         extra_keys.sort()
+#         if extra_keys:
+#             self.keys.extend(extra_keys)
+#             self.file.seek(0)
+#             lines = self.file.readlines()
+#             self.file.seek(0)
+#             for (i, k) in enumerate(self.keys):
+#                 if i > 0:
+#                     self.file.write(",")
+#                 self.file.write(k)
+#             self.file.write("\n")
+#             for line in lines[1:]:
+#                 self.file.write(line[:-1])
+#                 self.file.write(self.sep * len(extra_keys))
+#                 self.file.write("\n")
+#         for (i, k) in enumerate(self.keys):
+#             if i > 0:
+#                 self.file.write(",")
+#             v = kvs.get(k)
+#             if v is not None:
+#                 self.file.write(str(v))
+#         self.file.write("\n")
+#         self.file.flush()
+#
+#     def close(self):
+#         self.file.close()
+
+
 class CSVOutputFormat(KVWriter):
     def __init__(self, filename):
-        self.file = open(filename, "w+t")
+        self.filename = filename
         self.keys = []
-        self.sep = ","
+        self.file = open(filename, "w", newline='')
+        self.writer = None
+        self.delimiter = ","
 
     def writekvs(self, kvs):
-        # Add our current row to the history
-        extra_keys = list(kvs.keys() - self.keys)
-        extra_keys.sort()
-        if extra_keys:
-            self.keys.extend(extra_keys)
-            self.file.seek(0)
-            lines = self.file.readlines()
-            self.file.seek(0)
-            for (i, k) in enumerate(self.keys):
-                if i > 0:
-                    self.file.write(",")
-                self.file.write(k)
-            self.file.write("\n")
-            for line in lines[1:]:
-                self.file.write(line[:-1])
-                self.file.write(self.sep * len(extra_keys))
-                self.file.write("\n")
-        for (i, k) in enumerate(self.keys):
-            if i > 0:
-                self.file.write(",")
-            v = kvs.get(k)
-            if v is not None:
-                self.file.write(str(v))
-        self.file.write("\n")
+        # Update the set of keys
+        new_keys = [k for k in kvs.keys() if k not in self.keys]
+        if new_keys:
+            self.keys.extend(new_keys)
+            self.keys.sort()  # Keep keys sorted for consistency
+
+            # If writer already exists, we need to rewrite the file with the new header
+            if self.writer is not None:
+                self._rewrite_file()
+            else:
+                self.writer = csv.DictWriter(self.file, fieldnames=self.keys, delimiter=self.delimiter)
+                self.writer.writeheader()
+        else:
+            if self.writer is None:
+                self.writer = csv.DictWriter(self.file, fieldnames=self.keys, delimiter=self.delimiter)
+                self.writer.writeheader()
+
+        # Prepare the row with all keys
+        row = {key: kvs.get(key, None) for key in self.keys}
+        self.writer.writerow(row)
+        self.file.flush()
+
+    def _rewrite_file(self):
+        # Close the current file
+        self.file.close()
+        # Read existing data
+        with open(self.filename, "r") as f:
+            reader = csv.DictReader(f, delimiter=self.delimiter)
+            data = list(reader)
+        # Open the file in write mode and overwrite
+        self.file = open(self.filename, "w", newline='')
+        self.writer = csv.DictWriter(self.file, fieldnames=self.keys, delimiter=self.delimiter)
+        self.writer.writeheader()
+        # Write existing data with updated keys
+        for row in data:
+            # Fill in missing keys with None
+            row_full = {key: row.get(key, None) for key in self.keys}
+            self.writer.writerow(row_full)
         self.file.flush()
 
     def close(self):
