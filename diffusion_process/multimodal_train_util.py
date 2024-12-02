@@ -463,7 +463,7 @@ class TrainLoop:
                 )
                 x_T = {
                     "image": th.randn([self.batch_size, *self.model.module.image_size]).to(dist_util.dev()),
-                    "tabular": th.randn([self.batch_size, *self.model.module.tabular_size]).to(dist_util.dev())
+                    "tabular": th.randn([self.batch_size, self.model.module.tabular_size]).to(dist_util.dev())
                 }
                 sample = dpm_solver.sample(
                     x_T,
@@ -480,7 +480,7 @@ class TrainLoop:
                     model=self.model,
                     shape={
                         "image": [self.batch_size, *self.model.module.image_size],
-                        "tabular": [self.batch_size, *self.model.module.tabular_size]
+                        "tabular": [self.batch_size, self.model.module.tabular_size]
                     },
                     clip_denoised=True,
                     model_kwargs=model_kwargs,
@@ -491,24 +491,26 @@ class TrainLoop:
 
             sample_image = ((sample_image + 1) * 127.5).clamp(0, 255).to(th.uint8)
 
-            if dist_util.is_distributed():
-                gathered_sample_images = [th.zeros_like(sample_image) for _ in range(dist_util.world_size())]
+            if dist_util.get_world_size() > 1:
+                gathered_sample_images = [th.zeros_like(sample_image) for _ in range(dist_util.get_world_size())]
                 dist.all_gather(gathered_sample_images, sample_image)
             else:
                 gathered_sample_images = [sample_image]
 
-            all_images.extend([sample.cpu().numpy() for sample in gathered_sample_images])
+            # all_images.extend([sample.cpu().numpy() for sample in gathered_sample_images])
+            all_images.extend([img_tensor.cpu().numpy() for img_tensor in gathered_sample_images])
 
-            if dist_util.is_distributed():
+            if dist_util.get_world_size() > 1:
                 gathered_sample_tabular = [th.zeros_like(sample_tabular) for _ in range(dist_util.get_world_size())]
                 dist.all_gather(gathered_sample_tabular, sample_tabular)
             else:
                 gathered_sample_tabular = [sample_tabular]
 
-            all_tabular.extend([sample.cpu().numpy() for sample in gathered_sample_tabular])
+            # all_tabular.extend([sample.cpu().numpy() for sample in gathered_sample_tabular])
+            all_tabular.extend([tab_tensor.cpu().numpy() for tab_tensor in gathered_sample_tabular])
 
             # total_samples += self.batch_size * dist_util.get_world_size()
-            total_samples += self.batch_size * (dist_util.world_size() if dist_util.is_distributed() else 1)
+            total_samples += self.batch_size * (dist_util.get_world_size() if dist_util.get_world_size() > 1 else 1)
 
             if dist.get_rank() == 0:
                 logger.log(f"{total_samples} samples generated.")
@@ -525,7 +527,7 @@ class TrainLoop:
             # Save tabular data
             np.save(os.path.join(logger.get_dir(), f"sample_tabular.npy"), all_tabular)
 
-        if dist_util.is_distributed():
+        if dist_util.get_world_size() > 1:
             dist.barrier()
 
         # Restore original model parameters
