@@ -16,6 +16,7 @@ from multi_modal_diffusion.nn import update_ema
 from multi_modal_diffusion.resample import LossAwareSampler, UniformSampler
 from diffusion_process.multimodal_dpm_solver_plus import DPM_Solver
 from diffusion_process.evaluation_metrics import (compute_mmd_tabular, compute_fid, compute_mmd)
+from diffusion_process.metrics_utilities import plot_metrics
 
 INITIAL_LOG_LOSS_SCALE = 20.0
 
@@ -257,10 +258,13 @@ class TrainLoop:
             # evaluation step
             if (epoch + 1) % self.eval_interval == 0:
                 self.evaluate_model(epoch)
+                logger.dumpkvs()
 
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
+
+        plot_metrics()
 
     def run_step(self, batch, cond={}):
         self.mp_trainer.zero_grad()
@@ -290,14 +294,14 @@ class TrainLoop:
             fid_score = compute_fid(processed_generated_images, processed_real_images)
             # Compute MMD
             mmd_score = compute_mmd(generated_images, real_images)
-            logger.logkv("FID Score", fid_score)
-            logger.logkv("MMD Score", mmd_score)
+            logger.logkv_mean("FID Score", fid_score)
+            logger.logkv_mean("MMD Score", mmd_score)
 
             # Compute tabular metrics
             mmd_tabular = compute_mmd_tabular(generated_tabular, real_tabular)
-            logger.logkv("Tabular MMD Score", mmd_tabular)
+            logger.logkv_mean("Tabular MMD Score", mmd_tabular)
             # Optionally, save the metrics to a file or visualize them
-            logger.dumpkvs()
+            # logger.dumpkvs()
         self.model.train()  # Set model back to training mode
 
     def postprocess_images(self, images):
