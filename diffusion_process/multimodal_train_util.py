@@ -542,6 +542,11 @@ class TrainLoop:
         self.model.load_state_dict(original_model_state)
         self.opt.load_state_dict(original_optimizer_state)
 
+        # Re-initialize model_params and master_params
+        self.mp_trainer.model_params = list(self.model.parameters())
+        if not self.mp_trainer.use_fp16:
+            self.mp_trainer.master_params = self.mp_trainer.model_params
+
         # Update master parameters in mixed-precision trainer
         self.mp_trainer.master_params = self.mp_trainer.copy_model_params_to_master_params()
 
