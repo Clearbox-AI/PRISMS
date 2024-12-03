@@ -244,7 +244,7 @@ class TrainLoop:
                     # Run for a finite amount of time in integration tests.
 
                     # TODO: fix save sample
-                    # self.save_samples()
+                    self.save_samples()
                     if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                         return
 
@@ -441,6 +441,10 @@ class TrainLoop:
         all_tabular = []
         logger.log("create samples...")
 
+        # Save current model and optimizer states
+        original_model_state = copy.deepcopy(self.model.state_dict())
+        original_optimizer_state = copy.deepcopy(self.opt.state_dict())
+
         # Use EMA parameters for sampling
         if len(self.ema_params) > 0:
             state_dict = self.mp_trainer.master_params_to_state_dict(self.ema_params[0])
@@ -530,9 +534,16 @@ class TrainLoop:
         if dist_util.get_world_size() > 1:
             dist.barrier()
 
-        # Restore original model parameters
-        state_dict = self.mp_trainer.master_params_to_state_dict(self.mp_trainer.master_params)
-        self.model.load_state_dict(state_dict)
+        # # Restore original model parameters
+        # state_dict = self.mp_trainer.master_params_to_state_dict(self.mp_trainer.master_params)
+        # self.model.load_state_dict(state_dict)
+
+        # Restore original model and optimizer states
+        self.model.load_state_dict(original_model_state)
+        self.opt.load_state_dict(original_optimizer_state)
+
+        # Update master parameters in mixed-precision trainer
+        self.mp_trainer.master_params = self.mp_trainer.copy_model_params_to_master_params()
 
         return os.path.join(logger.get_dir(), f"sample_image_0.png")
 

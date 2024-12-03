@@ -269,7 +269,8 @@ class SingleModalAtten(nn.Module):
             # For tabular data, attention over features
             self.qkv = nn.Linear(channels, channels * 3)
             self.attention = nn.MultiheadAttention(embed_dim=channels, num_heads=self.num_heads)
-            self.proj_out = zero_module(nn.Linear(channels, channels))
+            # self.proj_out = zero_module(nn.Linear(channels, channels))
+            self.proj_out = nn.Linear(channels, channels)
         else:
             # For image data, attention over spatial dimensions
             self.qkv = conv_nd(1, channels, channels * 3, kernel_size=1)

@@ -228,6 +228,14 @@ class MixedPrecisionTrainer:
     def state_dict_to_master_params(self, state_dict):
         return state_dict_to_master_params(self.model, state_dict, self.use_fp16)
 
+    def copy_model_params_to_master_params(self):
+        """
+        Copy the model's parameters to the master parameters.
+        This is necessary to keep the optimizer's parameters in sync with the model's parameters.
+        """
+        for model_param, master_param in zip(self.model.parameters(), self.master_params):
+            master_param.data.copy_(model_param.data)
+
 
 def state_dict_to_master_params(model, state_dict, use_fp16):
     if use_fp16:
