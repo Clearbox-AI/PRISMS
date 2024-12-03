@@ -52,6 +52,8 @@ class ImageTabularDataset(Dataset):
         return len(self.patient_dirs)
 
     def __getitem__(self, idx):
+        import matplotlib.pyplot as plt
+
         patient_dir = self.patient_dirs[idx]
 
         # IMAGE PART
@@ -61,6 +63,22 @@ class ImageTabularDataset(Dataset):
             raise FileNotFoundError(f"No image .npy files found in {patient_dir}")
         image_path = image_files[0]  # Use the first .npy file found
         image = np.load(image_path).astype(np.float32)  # Shape: [H, W]
+
+        # Per image normalization since their values can vary too much
+        # Compute per-image mean and std
+        mean = image.mean()
+        std = image.std()
+        if std < 1e-8:
+            std = 1.0  # Avoid division by zero
+        image = (image - mean) / std
+
+        # # TODO
+        # # Visualize the 2D image
+        # plt.figure()
+        # plt.imshow(image, cmap='gray')
+        # plt.title('Original 2D Image')
+        # plt.axis('off')
+        # plt.show()
 
         # Resize image to the desired size
         image = self.resize_image(image, self.image_size)
@@ -76,8 +94,24 @@ class ImageTabularDataset(Dataset):
         elif image.shape[2] != 3:
             raise ValueError(f"Unexpected number of channels in image: {image.shape[2]}")
 
+        # #TODO
+        # # Visualize the 3D image before normalization
+        # plt.figure()
+        # image_display = image.copy()
+        # plt.imshow(image_display)
+        # plt.title('3-Channel Image Before Normalization')
+        # plt.axis('off')
+        # plt.show()
+
         # Normalize image data
-        image = (image - self.image_mean) / self.image_std  # Now shape is [H, W, 3]
+        # image = (image - self.image_mean) / self.image_std  # Now shape is [H, W, 3]
+
+        # #TODO
+        # plt.figure()
+        # plt.imshow(image)
+        # plt.title('3-Channel Image After Normalization')
+        # plt.axis('off')
+        # plt.show()
 
         # Transpose image to [C, H, W] for PyTorch
         image = np.transpose(image, (2, 0, 1))  # Shape: [3, H, W]
