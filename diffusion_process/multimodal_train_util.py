@@ -276,11 +276,49 @@ class TrainLoop:
         return loss
 
 
+    # def evaluate_model(self, epoch):
+    #     self.model.eval()  # Set model to evaluation mode
+    #     with th.no_grad():
+    #         # Generate samples
+    #         generated_images, generated_tabular = self.generate_samples(num_samples=self.num_eval_samples)
+    #         # Get real samples
+    #         real_images, real_tabular = self.get_real_samples(num_samples=self.num_eval_samples)
+    #
+    #         # Postprocess images
+    #         processed_generated_images = self.postprocess_images(generated_images)
+    #         processed_real_images = self.postprocess_images(real_images)
+    #
+    #         # Compute image metrics
+    #         # Compute FID
+    #         fid_score = compute_fid(processed_generated_images, processed_real_images)
+    #         # Compute MMD
+    #         mmd_score = compute_mmd(generated_images, real_images)
+    #         logger.logkv_mean("FID Score", fid_score)
+    #         logger.logkv_mean("MMD Score", mmd_score)
+    #
+    #         # Compute tabular metrics
+    #         mmd_tabular = compute_mmd_tabular(generated_tabular, real_tabular)
+    #         logger.logkv_mean("Tabular MMD Score", mmd_tabular)
+    #         # Optionally, save the metrics to a file or visualize them
+    #         # logger.dumpkvs()
+    #     self.model.train()  # Set model back to training mode
+
     def evaluate_model(self, epoch):
-        self.model.eval()  # Set model to evaluation mode
+        # Create a copy of the model for evaluation
+        eval_model = copy.deepcopy(self.model)
+        eval_model.to(dist_util.dev())  # Move the model copy to the appropriate device
+
+        # Load EMA parameters if needed
+        if len(self.ema_params) > 0:
+            state_dict = self.mp_trainer.master_params_to_state_dict(self.ema_params[0])
+            eval_model.load_state_dict(state_dict)
+
+        eval_model.eval()  # Set model to evaluation mode
+
         with th.no_grad():
-            # Generate samples
-            generated_images, generated_tabular = self.generate_samples(num_samples=self.num_eval_samples)
+            # Generate samples using eval_model
+            generated_images, generated_tabular = self.generate_samples(num_samples=self.num_eval_samples,
+                                                                        model=eval_model)
             # Get real samples
             real_images, real_tabular = self.get_real_samples(num_samples=self.num_eval_samples)
 
@@ -288,20 +326,19 @@ class TrainLoop:
             processed_generated_images = self.postprocess_images(generated_images)
             processed_real_images = self.postprocess_images(real_images)
 
-            # Compute image metrics
-            # Compute FID
+            # Compute metrics
             fid_score = compute_fid(processed_generated_images, processed_real_images)
-            # Compute MMD
             mmd_score = compute_mmd(generated_images, real_images)
+            mmd_tabular = compute_mmd_tabular(generated_tabular, real_tabular)
+
             logger.logkv_mean("FID Score", fid_score)
             logger.logkv_mean("MMD Score", mmd_score)
-
-            # Compute tabular metrics
-            mmd_tabular = compute_mmd_tabular(generated_tabular, real_tabular)
             logger.logkv_mean("Tabular MMD Score", mmd_tabular)
-            # Optionally, save the metrics to a file or visualize them
-            # logger.dumpkvs()
-        self.model.train()  # Set model back to training mode
+
+        # No need to reset the training model
+
+        # Dump logs if needed
+        logger.dumpkvs()
 
     def postprocess_images(self, images):
         # Detach from computation graph
@@ -336,14 +373,36 @@ class TrainLoop:
 
         return images
 
-    def generate_samples(self, num_samples=20):
-        self.model.eval()
+    # def generate_samples(self, num_samples=20):
+    #     self.model.eval()
+    #     with th.no_grad():
+    #         sample_fn = (
+    #             self.diffusion.p_sample_loop if self.sample_fn != 'ddim' else self.diffusion.ddim_sample_loop
+    #         )
+    #         sample = sample_fn(
+    #             model=self.model,
+    #             shape={
+    #                 "image": [num_samples, *self.model.module.image_size],
+    #                 "tabular": [num_samples, self.model.module.tabular_size]
+    #             },
+    #             clip_denoised=True,
+    #         )
+    #         generated_images = sample['image']
+    #         generated_tabular = sample['tabular']
+    #     self.model.train()
+    #     return generated_images, generated_tabular
+
+    def generate_samples(self, num_samples=20, model=None):
+        if model is None:
+            model = self.model  # Default to the training model if none is provided
+
+        model.eval()
         with th.no_grad():
             sample_fn = (
                 self.diffusion.p_sample_loop if self.sample_fn != 'ddim' else self.diffusion.ddim_sample_loop
             )
             sample = sample_fn(
-                model=self.model,
+                model=model,
                 shape={
                     "image": [num_samples, *self.model.module.image_size],
                     "tabular": [num_samples, self.model.module.tabular_size]
@@ -352,7 +411,7 @@ class TrainLoop:
             )
             generated_images = sample['image']
             generated_tabular = sample['tabular']
-        self.model.train()
+        model.train()
         return generated_images, generated_tabular
 
     def get_real_samples(self, num_samples=20):
@@ -441,14 +500,21 @@ class TrainLoop:
         all_tabular = []
         logger.log("create samples...")
 
-        # Save current model and optimizer states
-        original_model_state = copy.deepcopy(self.model.state_dict())
-        original_optimizer_state = copy.deepcopy(self.opt.state_dict())
+        # Create a copy of the model for sampling
+        sample_model = copy.deepcopy(self.model)
+        sample_model.to(dist_util.dev())  # Move the model copy to the appropriate device
+
+        # # Save current model and optimizer states
+        # original_model_state = copy.deepcopy(self.model.state_dict())
+        # original_optimizer_state = copy.deepcopy(self.opt.state_dict())
 
         # Use EMA parameters for sampling
         if len(self.ema_params) > 0:
             state_dict = self.mp_trainer.master_params_to_state_dict(self.ema_params[0])
-            self.model.load_state_dict(state_dict)
+            sample_model.load_state_dict(state_dict)
+
+        # Set the sample model to evaluation mode
+        sample_model.eval()
 
         total_samples = 0
         while total_samples < self.save_row ** 2:
@@ -538,17 +604,17 @@ class TrainLoop:
         # state_dict = self.mp_trainer.master_params_to_state_dict(self.mp_trainer.master_params)
         # self.model.load_state_dict(state_dict)
 
-        # Restore original model and optimizer states
-        self.model.load_state_dict(original_model_state)
-        self.opt.load_state_dict(original_optimizer_state)
-
-        # Re-initialize model_params and master_params
-        self.mp_trainer.model_params = list(self.model.parameters())
-        if not self.mp_trainer.use_fp16:
-            self.mp_trainer.master_params = self.mp_trainer.model_params
-
-        # Update master parameters in mixed-precision trainer
-        self.mp_trainer.master_params = self.mp_trainer.copy_model_params_to_master_params()
+        # # Restore original model and optimizer states
+        # self.model.load_state_dict(original_model_state)
+        # self.opt.load_state_dict(original_optimizer_state)
+        #
+        # # Re-initialize model_params and master_params
+        # self.mp_trainer.model_params = list(self.model.parameters())
+        # if not self.mp_trainer.use_fp16:
+        #     self.mp_trainer.master_params = self.mp_trainer.model_params
+        #
+        # # Update master parameters in mixed-precision trainer
+        # self.mp_trainer.master_params = self.mp_trainer.copy_model_params_to_master_params()
 
         return os.path.join(logger.get_dir(), f"sample_image_0.png")
 
