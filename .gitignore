@@ -10011,3 +10011,4 @@ dataset_mimic_multimodal/Lib/site-packages/tqdm-4.55.1.dist-info/WHEEL
 /dataset_management/dataset_NACC/NACC_management/
 /output/
 dataset_management/dataset_NACC/data/
+/dataset_management/toy_dataset_mnist/data/
