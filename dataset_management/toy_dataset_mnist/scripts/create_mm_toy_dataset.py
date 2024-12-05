@@ -2,10 +2,9 @@ import os
 import json
 import numpy as np
 from torchvision import datasets, transforms
-from scipy.stats import kurtosis, skew, mode
+from scipy.stats import kurtosis, skew
 from scipy.ndimage import center_of_mass, label
 from skimage.measure import regionprops
-
 
 def calculate_metrics(image_array):
     """
@@ -81,7 +80,7 @@ def create_multimodal_dataset(output_dir, dataset):
 
 if __name__ == "__main__":
     # Directory to save the multimodal dataset
-    output_dir = r"..\data"
+    output_dir = os.path.join("..", "data")
 
     # Download MNIST dataset
     transform = transforms.Compose([
@@ -90,7 +89,7 @@ if __name__ == "__main__":
         transforms.ToPILImage()
     ])
 
-    mnist_dataset = datasets.MNIST(root=r".\tmp_data", train=True, download=True, transform=transform)
+    mnist_dataset = datasets.MNIST(root=os.path.join(".", "tmp_data"), train=True, download=True, transform=transform)
 
     # Create the multimodal dataset
     create_multimodal_dataset(output_dir, mnist_dataset)

@@ -17,6 +17,7 @@ from multi_modal_diffusion.resample import LossAwareSampler, UniformSampler
 from diffusion_process.multimodal_dpm_solver_plus import DPM_Solver
 from diffusion_process.evaluation_metrics import (compute_mmd_tabular, compute_fid, compute_mmd)
 from diffusion_process.metrics_utilities import plot_metrics
+import time
 
 INITIAL_LOG_LOSS_SCALE = 20.0
 
@@ -589,13 +590,18 @@ class TrainLoop:
         all_tabular = np.concatenate(all_tabular, axis=0)
 
         if dist.get_rank() == 0:
+
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+            # Create new folder to save samples
+            samples_dir = os.path.join(logger.get_dir(), f'samples_{timestamp}')
+            os.makedirs(samples_dir, exist_ok=True)
             # Save images
             for idx, img_array in enumerate(all_images):
                 img = Image.fromarray(img_array.transpose(1, 2, 0))
-                img.save(os.path.join(logger.get_dir(), f"sample_image_{idx}.png"))
+                img.save(os.path.join(samples_dir, f"sample_image_{idx}.png"))
 
             # Save tabular data
-            np.save(os.path.join(logger.get_dir(), f"sample_tabular.npy"), all_tabular)
+            np.save(os.path.join(samples_dir, f"sample_tabular.npy"), all_tabular)
 
         if dist_util.get_world_size() > 1:
             dist.barrier()
@@ -616,7 +622,7 @@ class TrainLoop:
         # # Update master parameters in mixed-precision trainer
         # self.mp_trainer.master_params = self.mp_trainer.copy_model_params_to_master_params()
 
-        return os.path.join(logger.get_dir(), f"sample_image_0.png")
+        return
 
     def save(self):
         def save_checkpoint(rate, params):

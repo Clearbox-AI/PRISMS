@@ -207,14 +207,25 @@ class ImageTabularDataset(Dataset):
 
 
 
+import os
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+from PIL import Image
+from sklearn.preprocessing import StandardScaler
+from glob import glob
+
 class ToyMNISTDataset(Dataset):
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, resize_to=(32, 32)):
         """
         Args:
             data_dir (str): Path to the directory containing subdirectories for each sample.
-                            Each subdirectory should contain an image (as .npy) and a corresponding tabular .json file.
+                            Each subdirectory should contain an image (as .png) and a corresponding tabular .json file.
+            resize_to (tuple): Desired output size of the images (height, width).
         """
         self.data_dir = data_dir
+        self.resize_to = resize_to
 
         # Get list of sample directories
         self.sample_dirs = [
@@ -231,7 +242,12 @@ class ToyMNISTDataset(Dataset):
         self.compute_tabular_normalization()
 
         # Initialize transformation for images
-        self.image_transform = transforms.Normalize((0.5,), (0.5,))  # Normalize images to range [-1, 1]
+        self.image_transform = transforms.Compose([
+            transforms.Resize(self.resize_to),   # Resize images to desired size
+            transforms.ToTensor(),              # Convert PIL image to Tensor and scale pixel values to [0, 1]
+            transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Replicate the grayscale channel 3 times
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize images to range [-1, 1]
+        ])
 
     def __len__(self):
         return len(self.sample_dirs)
@@ -240,16 +256,16 @@ class ToyMNISTDataset(Dataset):
         sample_dir = self.sample_dirs[idx]
 
         # Load image data
-        image_files = glob(os.path.join(sample_dir, '*.npy'))
+        image_files = glob(os.path.join(sample_dir, '*.png'))
         if not image_files:
-            raise FileNotFoundError(f"No image .npy files found in {sample_dir}")
+            raise FileNotFoundError(f"No image .png files found in {sample_dir}")
         image_path = image_files[0]
-        image = np.load(image_path).astype(np.float32)  # Shape: [28, 28]
 
-        # Normalize image
-        image = (image - image.min()) / (image.max() - image.min())  # Scale to [0, 1]
-        image = th.tensor(image).unsqueeze(0)  # Add channel dimension, shape: [1, 28, 28]
-        image = self.image_transform(image)  # Normalize to [-1, 1]
+        # Open image using PIL and convert to grayscale
+        image = Image.open(image_path).convert('L')  # Convert to grayscale
+
+        # Apply transformations to the image
+        image = self.image_transform(image)  # Shape: [3, H, W]
 
         # Load tabular data
         json_files = glob(os.path.join(sample_dir, '*.json'))
@@ -260,11 +276,11 @@ class ToyMNISTDataset(Dataset):
             tabular_data = json.load(f)
 
         # Convert tabular data to numpy array
-        tabular_values = np.array(list(tabular_data.values()), dtype=np.float32).reshape(1, -1)
-        tabular_values = self.tabular_scaler.transform(tabular_values).flatten()
+        tabular_values = np.array(list(tabular_data.values()), dtype=np.float32)
+        tabular_values = self.tabular_scaler.transform(tabular_values.reshape(1, -1)).flatten()
 
         # Convert to torch tensor
-        tabular_tensor = th.tensor(tabular_values)
+        tabular_tensor = torch.tensor(tabular_values, dtype=torch.float32)
 
         return {'image': image, 'tabular': tabular_tensor}
 
@@ -285,3 +301,5 @@ class ToyMNISTDataset(Dataset):
 
         # Fit the scaler
         self.tabular_scaler.fit(all_tabular_data)
+
+
