@@ -1,12 +1,21 @@
+import json
+import torch as th
+from sklearn.preprocessing import StandardScaler
+import os
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
 from PIL import Image
+from glob import glob
 import os
 import json
+import torch
 import numpy as np
 from torch.utils.data import Dataset
-import torch as th
 from glob import glob
+import nibabel as nib
 from sklearn.preprocessing import StandardScaler
-from torchvision import transforms
 
 class ImageTabularDataset(Dataset):
     def __init__(self, data_dir, image_size=(256, 256)):
@@ -206,15 +215,7 @@ class ImageTabularDataset(Dataset):
         return mean, std
 
 
-
-import os
-import numpy as np
-import torch
-from torch.utils.data import Dataset
-from torchvision import transforms
-from PIL import Image
-from sklearn.preprocessing import StandardScaler
-from glob import glob
+# TOY MNIST
 
 class ToyMNISTDataset(Dataset):
     def __init__(self, data_dir, resize_to=(32, 32)):
@@ -303,3 +304,112 @@ class ToyMNISTDataset(Dataset):
         self.tabular_scaler.fit(all_tabular_data)
 
 
+# EXP LUMIR
+
+import random
+
+class ExpLumirDataset(Dataset):
+    def __init__(self, data_dir, image_size=(128, 128), max_samples=None):
+        """
+        Args:
+            data_dir (str): Path to the directory containing sample subdirectories.
+            image_size (tuple): Desired (H, W) size for the final 2D slice image.
+            max_samples (int, optional): Maximum number of random samples to include. If None, use all samples.
+        """
+        self.data_dir = data_dir
+        self.image_size = image_size
+
+        # Get list of sample directories
+        self.sample_dirs = [
+            os.path.join(data_dir, d) for d in os.listdir(data_dir)
+            if os.path.isdir(os.path.join(data_dir, d))
+        ]
+        if not self.sample_dirs:
+            raise ValueError(f"No sample directories found in {data_dir}")
+
+        # If max_samples is specified, randomly select a subset
+        if max_samples is not None:
+            if max_samples > len(self.sample_dirs):
+                raise ValueError(f"max_samples ({max_samples}) cannot exceed total samples ({len(self.sample_dirs)})")
+            self.sample_dirs = random.sample(self.sample_dirs, max_samples)
+
+        # Initialize StandardScaler for tabular data
+        self.tabular_scaler = StandardScaler()
+        self.compute_tabular_normalization()
+
+    def __len__(self):
+        return len(self.sample_dirs)
+
+    def __getitem__(self, idx):
+        sample_dir = self.sample_dirs[idx]
+
+        # Load the NIfTI file
+        nii_files = glob(os.path.join(sample_dir, '*.nii*'))
+        if not nii_files:
+            raise FileNotFoundError(f"No NIfTI files found in {sample_dir}")
+        nii_path = nii_files[0]
+        img_nii = nib.load(nii_path)
+        img_data = img_nii.get_fdata(dtype=np.float32)  # shape: [D, W, H]
+
+        if img_data.ndim != 3:
+            raise ValueError(f"Expected a 3D MRI volume, got shape {img_data.shape}")
+
+        # Select the middle slice along the D dimension (dimension 0)
+        mid_slice_idx = img_data.shape[0] // 2
+        img_2d = img_data[mid_slice_idx, ...]  # shape: [W, H]
+
+        # Currently, img_2d is [W, H], we want [H, W]
+        img_2d = img_2d.T  # Now [H, W]
+
+        # Resize the 2D slice
+        img_2d_resized = self.resize_image(img_2d, self.image_size)
+
+        # Normalize (z-score) after resizing
+        mean_val = img_2d_resized.mean()
+        std_val = img_2d_resized.std()
+        if std_val > 1e-6:
+            img_2d_resized = (img_2d_resized - mean_val) / std_val
+        else:
+            img_2d_resized = img_2d_resized - mean_val
+
+        # Replicate the grayscale channel 3 times to get shape [3, H, W]
+        img_tensor = torch.tensor(img_2d_resized, dtype=torch.float32).unsqueeze(0).repeat(3, 1, 1)
+
+        # Load tabular data
+        json_files = glob(os.path.join(sample_dir, '*.json'))
+        if not json_files:
+            raise FileNotFoundError(f"No JSON files found in {sample_dir}")
+        json_path = json_files[0]
+        with open(json_path, 'r') as f:
+            tabular_data = json.load(f)
+
+        # Convert tabular data to array and normalize
+        tabular_values = np.array(list(tabular_data.values()), dtype=np.float32)
+        tabular_values = self.tabular_scaler.transform(tabular_values.reshape(1, -1)).flatten()
+        tabular_tensor = torch.tensor(tabular_values, dtype=torch.float32)
+
+        return {'image': img_tensor, 'tabular': tabular_tensor}
+
+    def compute_tabular_normalization(self):
+        # Collect tabular data to fit scaler
+        all_tabular_data = []
+        for sample_dir in self.sample_dirs:
+            json_files = glob(os.path.join(sample_dir, '*.json'))
+            if not json_files:
+                continue
+            json_path = json_files[0]
+            with open(json_path, 'r') as f:
+                tabular_data = json.load(f)
+            all_tabular_data.append(list(tabular_data.values())[0])
+        if not all_tabular_data:
+            raise ValueError("No tabular data found in any sample directories.")
+        all_tabular_data = np.array(all_tabular_data, dtype=np.float32)
+        self.tabular_scaler.fit(all_tabular_data)
+
+    def resize_image(self, image, size):
+        # image: 2D numpy array [H, W]
+        # size: (H, W) desired
+        pil_image = Image.fromarray(image)
+        pil_image = pil_image.resize(size[::-1], Image.BILINEAR)  # Note: (W, H) for PIL
+        image_resized = np.array(pil_image, dtype=np.float32)
+        return image_resized

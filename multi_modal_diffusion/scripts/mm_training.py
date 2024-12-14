@@ -26,14 +26,15 @@ from diffusion_process.multimodal_train_util import TrainLoop
 from multi_modal_diffusion.common import set_seed_logger_random
 from torch.utils.data.distributed import DistributedSampler
 from sklearn.preprocessing import StandardScaler
-from diffusion_process.dataloaders import (ImageTabularDataset, ToyMNISTDataset)
+from diffusion_process.dataloaders import (ImageTabularDataset, ToyMNISTDataset, ExpLumirDataset)
 
 
 
 
 def load_training_data(args):
-    dataset = ImageTabularDataset(args.data_dir, image_size=(64, 64))
+    # dataset = ImageTabularDataset(args.data_dir, image_size=(64, 64))
     # dataset = ToyMNISTDataset(args.data_dir)
+    dataset = ExpLumirDataset(args.data_dir, image_size=(64, 64))
     sampler = DistributedSampler(dataset) if dist_util.get_world_size() > 1 else None
     data_loader = th.utils.data.DataLoader(
         dataset,
@@ -129,14 +130,14 @@ def create_argparser():
         seed=42,
         weight_decay=0.0,
         lr_anneal_steps=0,
-        batch_size=64,
+        batch_size=16,
         num_workers=0,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=10,
         devices=None,  # This argument is retained but not used
         save_interval=100,
-        output_dir="output",
+        output_dir="/mnt/storage/lumir_results",
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
