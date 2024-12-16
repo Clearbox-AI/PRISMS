@@ -169,7 +169,7 @@ def create_model(
     image_attention_resolutions = [int(i) for i in image_attention_resolutions.split(',')]
     tabular_attention_resolutions = [int(i) for i in tabular_attention_resolutions.split(',')]
 
-    return MultimodalUNet(
+    unet_model = MultimodalUNet(
         image_size=image_size,
         tabular_size=tabular_size,
         model_channels=num_channels,
@@ -190,6 +190,8 @@ def create_model(
         use_scale_shift_norm=use_scale_shift_norm,
         resblock_updown=resblock_updown
     )
+    freeze_tabular_layers(unet_model, freeze=True)
+    return unet_model
 
 
 def create_gaussian_diffusion(
@@ -259,6 +261,34 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError("boolean value expected")
+
+def freeze_tabular_layers(model, freeze=True):
+    """
+    Freeze or unfreeze all tabular-related layers in the given model.
+    This function searches through named_parameters and sets requires_grad accordingly.
+    """
+    # Substrings that appear in tabular-only layer names:
+    tabular_substrings = [
+        "tabular_in_layers",
+        "tabular_out_layers",
+        "tabular_skip_connection",
+        "tabular_mlp",      # Matches instances like 'tabular_mlp.mlp'
+        "tab_upd",
+        "tab_norm",
+        "tab_qkv",
+        "tab_proj_out",
+        "tabular_out",      # Final tabular output MLP
+        "TabularMLP",       # Matches module-level naming
+    ]
+
+    for name, param in model.named_parameters():
+        # Check if any of the tabular-specific substrings is in the parameter name
+        if any(s in name for s in tabular_substrings):
+            param.requires_grad = not freeze
+            out = "FREEZE"
+        else:
+            out = "normal"
+        # print(f"- {name}: {out}")
 
 
 if __name__ == "__main__":

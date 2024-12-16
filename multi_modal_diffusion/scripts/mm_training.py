@@ -82,17 +82,17 @@ def main():
     model.to(dist_util.dev())
 
     # Wrap model with DistributedDataParallel if using GPUs
-    if dist_util.dev().type == 'cuda' and dist_util.get_world_size() > 1:
-        model = th.nn.parallel.DistributedDataParallel(
-            model, device_ids=[dist_util.dev()], output_device=dist_util.dev(),
-            find_unused_parameters=True
-        )
+    # if dist_util.dev().type == 'cuda' and dist_util.get_world_size() > 1:
+    #     model = th.nn.parallel.DistributedDataParallel(
+    #         model, device_ids=[dist_util.dev()], output_device=dist_util.dev(),
+    #         find_unused_parameters=True
+    #     )
 
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log("Starting training...")
 
-    num_epochs = 20
+    num_epochs = 10
     eval_interval = 1
     num_eval_samples = 20
 
@@ -130,14 +130,14 @@ def create_argparser():
         seed=42,
         weight_decay=0.0,
         lr_anneal_steps=0,
-        batch_size=16,
+        batch_size=4,
         num_workers=0,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=10,
         devices=None,  # This argument is retained but not used
         save_interval=100,
-        output_dir="/mnt/storage/lumir_results",
+        output_dir="/mnt/storage/lumir_three_stage_exp/stage_one",
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,

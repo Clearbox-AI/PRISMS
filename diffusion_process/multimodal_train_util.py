@@ -109,19 +109,18 @@ class TrainLoop:
             ]
         self.output_model_stastics()
 
-        if th.cuda.is_available():
-            self.use_ddp = False
-            self.ddp_model = self.model
-            #self.use_ddp = True
-            #self.ddp_model = DDP(
-            #    self.model,
-            #    device_ids=[dist_util.dev()],
-            #    output_device=dist_util.dev(),
-            #    broadcast_buffers=False,
-            #    bucket_cap_mb=128,
-            #    find_unused_parameters=False,
-            #)
-            #print("******DDP sync model done...")
+        # Properly enable DDP if in a distributed environment
+        if dist.is_initialized() and dist_util.get_world_size() > 1:
+            self.use_ddp = True
+            self.ddp_model = DDP(
+                self.model,
+                device_ids=[dist_util.dev()],
+                output_device=dist_util.dev(),
+                broadcast_buffers=False,
+                bucket_cap_mb=128,
+                find_unused_parameters=False,
+            )
+            dist_util.sync_params(self.ddp_model.parameters())
 
         else:
             if dist_util.get_world_size() > 1:
@@ -204,41 +203,23 @@ class TrainLoop:
             )
             self.opt.load_state_dict(state_dict)
 
-    # def run_loop(self):
-    #
-    #     while (
-    #             not self.lr_anneal_steps
-    #             or self.step + self.resume_step < self.lr_anneal_steps
-    #     ):
-    #
-    #         batch = next(self.data)
-    #         loss = self.run_step(batch)
-    #         print(f"loss: {loss}")
-    #
-    #         if self.step % self.log_interval == 0:
-    #             logger.dumpkvs()
-    #
-    #         if self.step % self.save_interval == 0:
-    #             self.save()
-    #             # Run for a finite amount of time in integration tests.
-    #             output_path = self.save_samples()
-    #             if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
-    #                 return
-    #         self.step += 1
-    #     # Save the last checkpoint if it wasn't already saved.
-    #     if (self.step - 1) % self.save_interval != 0:
-    #         self.save()
-
 
     def run_loop(self):
         for epoch in range(self.num_epochs):
             logger.log(f"Starting epoch {epoch + 1}/{self.num_epochs}")
+            # If using a DistributedSampler, set the epoch for proper shuffling.
             if isinstance(self.data.sampler, th.utils.data.DistributedSampler):
-                self.data.sampler.set_epoch(epoch)  # For distributed training
+                self.data.sampler.set_epoch(epoch)
 
             for batch in self.data:
                 loss = self.run_step(batch)
-                print(f"Epoch {epoch + 1}, Step {self.step}, Loss: {loss}")
+
+                if not dist.is_initialized():
+                    print(f"Epoch {epoch + 1}, Step {self.step}, Loss: {loss}")
+                else:
+                    if dist.get_rank() == 0:
+                        print(f"Epoch {epoch + 1}, Step {self.step}, Loss: {loss}")
+                # print(f"Epoch {epoch + 1}, Step {self.step}, Loss: {loss}")
 
                 if self.step % self.log_interval == 0:
                     logger.dumpkvs()
@@ -282,32 +263,6 @@ class TrainLoop:
         return loss
 
 
-    # def evaluate_model(self, epoch):
-    #     self.model.eval()  # Set model to evaluation mode
-    #     with th.no_grad():
-    #         # Generate samples
-    #         generated_images, generated_tabular = self.generate_samples(num_samples=self.num_eval_samples)
-    #         # Get real samples
-    #         real_images, real_tabular = self.get_real_samples(num_samples=self.num_eval_samples)
-    #
-    #         # Postprocess images
-    #         processed_generated_images = self.postprocess_images(generated_images)
-    #         processed_real_images = self.postprocess_images(real_images)
-    #
-    #         # Compute image metrics
-    #         # Compute FID
-    #         fid_score = compute_fid(processed_generated_images, processed_real_images)
-    #         # Compute MMD
-    #         mmd_score = compute_mmd(generated_images, real_images)
-    #         logger.logkv_mean("FID Score", fid_score)
-    #         logger.logkv_mean("MMD Score", mmd_score)
-    #
-    #         # Compute tabular metrics
-    #         mmd_tabular = compute_mmd_tabular(generated_tabular, real_tabular)
-    #         logger.logkv_mean("Tabular MMD Score", mmd_tabular)
-    #         # Optionally, save the metrics to a file or visualize them
-    #         # logger.dumpkvs()
-    #     self.model.train()  # Set model back to training mode
 
     def evaluate_model(self, epoch):
         # Create a copy of the model for evaluation
@@ -346,38 +301,7 @@ class TrainLoop:
         # Dump logs if needed
         logger.dumpkvs()
 
-    # def evaluate_model(self, epoch):
-    #     # Store the original model parameters (on CPU) before loading EMA
-    #     original_params = copy.deepcopy(self.mp_trainer.master_params_to_state_dict(self.mp_trainer.master_params))
-    #
-    #     # Load EMA parameters into the same model
-    #     if len(self.ema_params) > 0:
-    #         ema_state = self.mp_trainer.master_params_to_state_dict(self.ema_params[0])
-    #         self.model.load_state_dict(ema_state)
-    #
-    #     self.model.eval()
-    #     with th.no_grad():
-    #         generated_images, generated_tabular = self.generate_samples(num_samples=self.num_eval_samples,
-    #                                                                     model=self.model)
-    #         real_images, real_tabular = self.get_real_samples(num_samples=self.num_eval_samples)
-    #
-    #         processed_generated_images = self.postprocess_images(generated_images)
-    #         processed_real_images = self.postprocess_images(real_images)
-    #
-    #         fid_score = compute_fid(processed_generated_images, processed_real_images)
-    #         mmd_score = compute_mmd(generated_images, real_images)
-    #         mmd_tabular = compute_mmd_tabular(generated_tabular, real_tabular)
-    #
-    #         logger.logkv_mean("FID Score", fid_score)
-    #         logger.logkv_mean("MMD Score", mmd_score)
-    #         logger.logkv_mean("Tabular MMD Score", mmd_tabular)
-    #
-    #     logger.dumpkvs()
-    #
-    #     # Restore the original parameters and set model back to train mode
-    #     self.model.load_state_dict(original_params)
-    #     self.model.train()
-    #     th.cuda.empty_cache()  # Optionally clear cache
+
 
 
     def postprocess_images(self, images):
@@ -413,24 +337,7 @@ class TrainLoop:
 
         return images
 
-    # def generate_samples(self, num_samples=20):
-    #     self.model.eval()
-    #     with th.no_grad():
-    #         sample_fn = (
-    #             self.diffusion.p_sample_loop if self.sample_fn != 'ddim' else self.diffusion.ddim_sample_loop
-    #         )
-    #         sample = sample_fn(
-    #             model=self.model,
-    #             shape={
-    #                 "image": [num_samples, *self.model.module.image_size],
-    #                 "tabular": [num_samples, self.model.module.tabular_size]
-    #             },
-    #             clip_denoised=True,
-    #         )
-    #         generated_images = sample['image']
-    #         generated_tabular = sample['tabular']
-    #     self.model.train()
-    #     return generated_images, generated_tabular
+
 
     def generate_samples(self, num_samples=20, model=None):
         if model is None:
@@ -537,123 +444,7 @@ class TrainLoop:
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
 
-    # TODO: NON FUNZIONA, MA RIPARTIRE DA QUA
-    # def save_samples(self):
-    #     # Helper functions to safely get rank and world size
-    #     def get_rank_safe():
-    #         return dist.get_rank() if dist.is_initialized() else 0
-    #
-    #     def get_world_size_safe():
-    #         return dist.get_world_size() if dist.is_initialized() else 1
-    #
-    #     rank = get_rank_safe()
-    #     world_size = get_world_size_safe()
-    #
-    #     all_images = []
-    #     all_tabular = []
-    #     logger.log("create samples...")
-    #
-    #     # Create a copy of the model for sampling
-    #     sample_model = copy.deepcopy(self.model)
-    #     sample_model.to(dist_util.dev())  # Move the model copy to the appropriate device
-    #
-    #     # Use EMA parameters for sampling if available
-    #     if len(self.ema_params) > 0:
-    #         state_dict = self.mp_trainer.master_params_to_state_dict(self.ema_params[0])
-    #         sample_model.load_state_dict(state_dict)
-    #
-    #     # Set the sample model to evaluation mode
-    #     sample_model.eval()
-    #
-    #     # Determine image and tabular sizes
-    #     image_size, tabular_size = get_model_sizes(self.model)
-    #
-    #     total_samples = 0
-    #     while total_samples < self.save_row ** 2:
-    #         model_kwargs = {}
-    #
-    #         if self.class_cond:
-    #             classes = th.randint(
-    #                 low=0, high=self.num_classes, size=(self.batch_size,), device=dist_util.dev()
-    #             )
-    #             model_kwargs["y"] = classes
-    #
-    #         if self.sample_fn == 'dpm_solver':
-    #             dpm_solver = DPM_Solver(
-    #                 model=sample_model,
-    #                 alphas_cumprod=th.tensor(self.diffusion.alphas_cumprod).to(dist_util.dev())
-    #             )
-    #             x_T = {
-    #                 "image": th.randn([self.batch_size, *image_size], device=dist_util.dev()),
-    #                 "tabular": th.randn([self.batch_size, tabular_size], device=dist_util.dev())
-    #             }
-    #             sample = dpm_solver.sample(
-    #                 x_T,
-    #                 steps=20,
-    #                 order=2,
-    #                 skip_type="logSNR",
-    #                 method="adaptive",
-    #             )
-    #         else:
-    #             sample_fn = (
-    #                 self.diffusion.p_sample_loop if self.sample_fn != 'ddim' else self.diffusion.ddim_sample_loop
-    #             )
-    #             sample = sample_fn(
-    #                 model=sample_model,
-    #                 shape={
-    #                     "image": [self.batch_size, *image_size],
-    #                     "tabular": [self.batch_size, tabular_size]
-    #                 },
-    #                 clip_denoised=True,
-    #                 model_kwargs=model_kwargs,
-    #             )
-    #
-    #         sample_image = sample['image']
-    #         sample_tabular = sample['tabular']
-    #
-    #         # Convert from [-1, 1] to [0, 255]
-    #         sample_image = ((sample_image + 1) * 127.5).clamp(0, 255).to(th.uint8)
-    #
-    #         # Gather samples from all ranks if distributed
-    #         if world_size > 1:
-    #             gathered_sample_images = [th.zeros_like(sample_image) for _ in range(world_size)]
-    #             gathered_sample_tabular = [th.zeros_like(sample_tabular) for _ in range(world_size)]
-    #             dist.all_gather(gathered_sample_images, sample_image)
-    #             dist.all_gather(gathered_sample_tabular, sample_tabular)
-    #         else:
-    #             gathered_sample_images = [sample_image]
-    #             gathered_sample_tabular = [sample_tabular]
-    #
-    #         # Extend lists
-    #         all_images.extend([img_tensor.cpu().numpy() for img_tensor in gathered_sample_images])
-    #         all_tabular.extend([tab_tensor.cpu().numpy() for tab_tensor in gathered_sample_tabular])
-    #
-    #         total_samples += self.batch_size * world_size
-    #
-    #         # Only the main process logs if distributed, otherwise it's the only process anyway
-    #         if rank == 0:
-    #             logger.log(f"{total_samples} samples generated.")
-    #
-    #     all_images = np.concatenate(all_images, axis=0)
-    #     all_tabular = np.concatenate(all_tabular, axis=0)
-    #
-    #     # Save results only on the main process
-    #     if rank == 0:
-    #         timestamp = time.strftime('%Y%m%d_%H%M%S')
-    #         samples_dir = os.path.join(logger.get_dir(), f'samples_{timestamp}')
-    #         os.makedirs(samples_dir, exist_ok=True)
-    #         # Save images
-    #         for idx, img_array in enumerate(all_images):
-    #             img = Image.fromarray(img_array.transpose(1, 2, 0))
-    #             img.save(os.path.join(samples_dir, f"sample_image_{idx}.png"))
-    #         # Save tabular data
-    #         np.save(os.path.join(samples_dir, f"sample_tabular.npy"), all_tabular)
-    #
-    #     # Barrier only if we are in a distributed setup
-    #     if dist.is_initialized() and world_size > 1:
-    #         dist.barrier()
-    #
-    #     return
+
 
     def save_samples(self):
 
@@ -772,100 +563,7 @@ class TrainLoop:
         if world_size > 1:
             dist.barrier()
 
-    # def save_samples(self):
-    #     # Store the original model parameters (on CPU) before loading EMA
-    #     original_params = copy.deepcopy(self.mp_trainer.master_params_to_state_dict(self.mp_trainer.master_params))
-    #
-    #     # Load EMA parameters if available
-    #     if len(self.ema_params) > 0:
-    #         ema_state = self.mp_trainer.master_params_to_state_dict(self.ema_params[0])
-    #         self.model.load_state_dict(ema_state)
-    #
-    #     self.model.eval()
-    #
-    #     rank = dist.get_rank() if dist.is_initialized() else 0
-    #     world_size = dist.get_world_size() if dist.is_initialized() else 1
-    #
-    #     all_images = []
-    #     all_tabular = []
-    #     logger.log("create samples...")
-    #
-    #     image_size, tabular_size = get_model_sizes(self.model)
-    #
-    #     with th.no_grad():
-    #         total_samples = 0
-    #         while total_samples < self.save_row ** 2:
-    #             model_kwargs = {}
-    #             if self.class_cond:
-    #                 classes = th.randint(low=0, high=self.num_classes, size=(self.batch_size,), device=dist_util.dev())
-    #                 model_kwargs["y"] = classes
-    #
-    #             if self.sample_fn == 'dpm_solver':
-    #                 dpm_solver = DPM_Solver(
-    #                     model=self.model,
-    #                     alphas_cumprod=th.tensor(self.diffusion.alphas_cumprod).to(dist_util.dev())
-    #                 )
-    #                 x_T = {
-    #                     "image": th.randn([self.batch_size, *image_size], device=dist_util.dev()),
-    #                     "tabular": th.randn([self.batch_size, tabular_size], device=dist_util.dev())
-    #                 }
-    #                 sample = dpm_solver.sample(
-    #                     x_T,
-    #                     steps=20,
-    #                     order=2,
-    #                     skip_type="logSNR",
-    #                     method="adaptive",
-    #                 )
-    #             else:
-    #                 sf = self.diffusion.p_sample_loop if self.sample_fn != 'ddim' else self.diffusion.ddim_sample_loop
-    #                 sample = sf(
-    #                     model=self.model,
-    #                     shape={
-    #                         "image": [self.batch_size, *image_size],
-    #                         "tabular": [self.batch_size, tabular_size]
-    #                     },
-    #                     clip_denoised=True,
-    #                     model_kwargs=model_kwargs,
-    #                 )
-    #
-    #             sample_image = ((sample['image'] + 1) * 127.5).clamp(0, 255).to(th.uint8)
-    #             sample_tabular = sample['tabular']
-    #
-    #             if world_size > 1:
-    #                 gathered_sample_images = [th.zeros_like(sample_image) for _ in range(world_size)]
-    #                 gathered_sample_tabular = [th.zeros_like(sample_tabular) for _ in range(world_size)]
-    #                 dist.all_gather(gathered_sample_images, sample_image)
-    #                 dist.all_gather(gathered_sample_tabular, sample_tabular)
-    #             else:
-    #                 gathered_sample_images = [sample_image]
-    #                 gathered_sample_tabular = [sample_tabular]
-    #
-    #             all_images.extend([img_tensor.cpu().numpy() for img_tensor in gathered_sample_images])
-    #             all_tabular.extend([tab_tensor.cpu().numpy() for tab_tensor in gathered_sample_tabular])
-    #
-    #             total_samples += self.batch_size * world_size
-    #             if rank == 0:
-    #                 logger.log(f"{total_samples} samples generated.")
-    #
-    #     all_images = np.concatenate(all_images, axis=0)
-    #     all_tabular = np.concatenate(all_tabular, axis=0)
-    #
-    #     if rank == 0:
-    #         timestamp = time.strftime('%Y%m%d_%H%M%S')
-    #         samples_dir = os.path.join(logger.get_dir(), f'samples_{timestamp}')
-    #         os.makedirs(samples_dir, exist_ok=True)
-    #         for idx, img_array in enumerate(all_images):
-    #             img = Image.fromarray(img_array.transpose(1, 2, 0))
-    #             img.save(os.path.join(samples_dir, f"sample_image_{idx}.png"))
-    #         np.save(os.path.join(samples_dir, f"sample_tabular.npy"), all_tabular)
-    #
-    #     if dist.is_initialized() and world_size > 1:
-    #         dist.barrier()
-    #
-    #     # Restore original parameters
-    #     self.model.load_state_dict(original_params)
-    #     self.model.train()
-    #     th.cuda.empty_cache()  # Optionally clear cache
+
 
     def save(self):
         def save_checkpoint(rate, params):

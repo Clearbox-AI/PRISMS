@@ -309,7 +309,7 @@ class ToyMNISTDataset(Dataset):
 import random
 
 class ExpLumirDataset(Dataset):
-    def __init__(self, data_dir, image_size=(128, 128), max_samples=None):
+    def __init__(self, data_dir, image_size=(128, 128), max_samples=None, drop_last=True):
         """
         Args:
             data_dir (str): Path to the directory containing sample subdirectories.
