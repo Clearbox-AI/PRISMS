@@ -21,6 +21,13 @@ import time
 
 INITIAL_LOG_LOSS_SCALE = 20.0
 
+def debug_memory(prefix=""):
+    if th.cuda.is_available():
+        allocated = th.cuda.memory_allocated() / (1024**2)
+        reserved = th.cuda.memory_reserved() / (1024**2)
+        print(f"{prefix} GPU Memory - Allocated: {allocated:.2f}MB, Reserved: {reserved:.2f}MB")
+    else:
+        print(f"{prefix} GPU Memory Debug: CPU mode, no CUDA available.")
 
 class TrainLoop:
     def __init__(
@@ -83,6 +90,9 @@ class TrainLoop:
         self.sync_cuda = th.cuda.is_available()
         self.sample_fn = sample_fn
 
+        print("DEBUG: Initializing TrainLoop")
+        debug_memory("Init start:")
+
         self._load_and_sync_parameters()
 
         self.mp_trainer = MixedPrecisionTrainer(
@@ -111,6 +121,13 @@ class TrainLoop:
 
         # Properly enable DDP if in a distributed environment
         if dist.is_initialized() and dist_util.get_world_size() > 1:
+            print("DEBUG: Initializing DDP")
+            debug_memory("Before DDP:")
+            # Ensure device_ids is an integer index if needed
+            local_rank = dist_util.dev().index if dist_util.dev().type == 'cuda' else None
+            if local_rank is None:
+                local_rank = 0
+
             self.use_ddp = True
             self.ddp_model = DDP(
                 self.model,
@@ -121,6 +138,7 @@ class TrainLoop:
                 find_unused_parameters=False,
             )
             dist_util.sync_params(self.ddp_model.parameters())
+            debug_memory("After DDP:")
 
         else:
             if dist_util.get_world_size() > 1:
@@ -130,6 +148,8 @@ class TrainLoop:
                 )
             self.use_ddp = False
             self.ddp_model = self.model
+
+        debug_memory("Init end:")
 
     def output_model_stastics(self):
         num_params_total = sum(p.numel() for p in self.model.parameters())
@@ -212,7 +232,9 @@ class TrainLoop:
                 self.data.sampler.set_epoch(epoch)
 
             for batch in self.data:
+                debug_memory(f"Before run_step (epoch {epoch + 1}, step {self.step}):")
                 loss = self.run_step(batch)
+                debug_memory(f"After run_step (epoch {epoch + 1}, step {self.step}):")
 
                 if not dist.is_initialized():
                     print(f"Epoch {epoch + 1}, Step {self.step}, Loss: {loss}")
@@ -243,12 +265,16 @@ class TrainLoop:
 
             # evaluation step
             if (epoch + 1) % self.eval_interval == 0:
+                debug_memory("Before evaluate_model:")
                 self.evaluate_model(epoch)
+                debug_memory("After evaluate_model:")
                 logger.dumpkvs()
 
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
+            debug_memory("Before final save:")
             self.save()
+            debug_memory("After final save:")
 
         plot_metrics()
 
