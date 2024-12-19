@@ -26,15 +26,14 @@ from diffusion_process.multimodal_train_util import TrainLoop
 from multi_modal_diffusion.common import set_seed_logger_random
 from torch.utils.data.distributed import DistributedSampler
 from sklearn.preprocessing import StandardScaler
-from diffusion_process.dataloaders import (ImageTabularDataset, ToyMNISTDataset, ExpLumirDataset)
-
-
+from diffusion_process.dataloaders import (ImageTabularDataset, ToyMNISTDataset, ExpLumirDataset, LDMOneHDataset)
 
 
 def load_training_data(args):
     # dataset = ImageTabularDataset(args.data_dir, image_size=(64, 64))
     # dataset = ToyMNISTDataset(args.data_dir)
-    dataset = ExpLumirDataset(args.data_dir, image_size=(64, 64))
+    # dataset = ExpLumirDataset(args.data_dir, image_size=(64, 64))
+    dataset = LDMOneHDataset(args.data_dir, image_size=(64, 64), modality="tabular")
     sampler = DistributedSampler(dataset) if dist_util.get_world_size() > 1 else None
     data_loader = th.utils.data.DataLoader(
         dataset,
@@ -92,7 +91,7 @@ def main():
 
     logger.log("Starting training...")
 
-    num_epochs = 10
+    num_epochs = 2
     eval_interval = 1
     num_eval_samples = 20
 
@@ -136,15 +135,15 @@ def create_argparser():
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=10,
         devices=None,  # This argument is retained but not used
-        save_interval=100,
-        output_dir="/mnt/storage/lumir_three_stage_exp/stage_one",
+        save_interval=2000,
+        output_dir="/mnt/storage/lumir_three_stage_exp/stage_two",
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
         sample_fn="dpm_solver",
         class_cond=False,
         image_size="",  # Will be inferred from data
-        tabular_size="",  # Will be inferred from data
+        tabular_size=""  # Will be inferred from data
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

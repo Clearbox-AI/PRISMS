@@ -413,3 +413,276 @@ class ExpLumirDataset(Dataset):
         pil_image = pil_image.resize(size[::-1], Image.BILINEAR)  # Note: (W, H) for PIL
         image_resized = np.array(pil_image, dtype=np.float32)
         return image_resized
+
+
+
+# LDMOneH Dataset
+
+# class LDMOneHDataset(Dataset):
+#     def __init__(self, data_dir, image_size=(128, 128), max_samples=None, drop_last=True):
+#         """
+#         Args:
+#             data_dir (str): Path to the directory containing sample subdirectories.
+#             image_size (tuple): Desired (H, W) size for the final 2D slice image.
+#             max_samples (int, optional): Maximum number of random samples to include. If None, use all samples.
+#         """
+#         self.data_dir = data_dir
+#         self.image_size = image_size
+#
+#         # Get list of 'anat' directories under each patient folder
+#         self.sample_dirs = []
+#         rawdata_path = os.path.join(self.data_dir, "rawdata")
+#         for patient_folder in os.listdir(rawdata_path):
+#             anat_path = os.path.join(rawdata_path, patient_folder, "anat")
+#             if os.path.isdir(anat_path):
+#                 self.sample_dirs.append(anat_path)
+#
+#         if not self.sample_dirs:
+#             raise ValueError(f"No sample directories found in {data_dir}")
+#
+#         # If max_samples is specified, randomly select a subset
+#         if max_samples is not None:
+#             if max_samples > len(self.sample_dirs):
+#                 raise ValueError(f"max_samples ({max_samples}) cannot exceed total samples ({len(self.sample_dirs)})")
+#             self.sample_dirs = random.sample(self.sample_dirs, max_samples)
+#
+#     def __len__(self):
+#         return len(self.sample_dirs)
+#
+#     def __getitem__(self, idx):
+#         sample_dir = self.sample_dirs[idx]
+#
+#         # Load the NIfTI file
+#         nii_files = glob(os.path.join(sample_dir, '*.nii*'))
+#         if not nii_files:
+#             raise FileNotFoundError(f"No NIfTI files found in {sample_dir}")
+#         nii_path = nii_files[0]
+#         img_nii = nib.load(nii_path)
+#         img_data = img_nii.get_fdata(dtype=np.float32)  # shape: [D, W, H]
+#
+#         if img_data.ndim != 3:
+#             raise ValueError(f"Expected a 3D MRI volume, got shape {img_data.shape}")
+#
+#         # Select the middle slice along the D dimension (dimension 0)
+#         mid_slice_idx = img_data.shape[0] // 2
+#         img_2d = img_data[mid_slice_idx, ...]  # shape: [W, H]
+#
+#         # import matplotlib.pyplot as plt
+#         # plt.imshow(img_data[:, :, mid_slice_idx], cmap="gray")
+#         # plt.show()
+#
+#         # Currently, img_2d is [W, H], we want [H, W]
+#         img_2d = img_2d.T  # Now [H, W]
+#
+#         # Resize the 2D slice
+#         img_2d_resized = self.resize_image(img_2d, self.image_size)
+#
+#         # Normalize (z-score) after resizing
+#         mean_val = img_2d_resized.mean()
+#         std_val = img_2d_resized.std()
+#         if std_val > 1e-6:
+#             img_2d_resized = (img_2d_resized - mean_val) / std_val
+#         else:
+#             img_2d_resized = img_2d_resized - mean_val
+#
+#         # Replicate the grayscale channel 3 times to get shape [3, H, W]
+#         img_tensor = torch.tensor(img_2d_resized, dtype=torch.float32).unsqueeze(0).repeat(3, 1, 1)
+#
+#         #img_tensor = np.transpose(img_tensor, (1, 2, 0))
+#
+#         # Fake tabular data: 128 zeros
+#         tabular_tensor = torch.zeros(128, dtype=torch.float32)
+#
+#         return {'image': img_tensor, 'tabular': tabular_tensor}
+#
+#     def resize_image(self, image, size):
+#         # image: 2D numpy array [H, W]
+#         # size: (H, W) desired
+#         pil_image = Image.fromarray(image)
+#         pil_image = pil_image.resize(size[::-1], Image.BILINEAR)  # Note: (W, H) for PIL
+#         image_resized = np.array(pil_image, dtype=np.float32)
+#         return image_resized
+#
+#     # def resize_image(self, image, size):
+#     #     """
+#     #     Resize the image while maintaining aspect ratio.
+#     #
+#     #     Parameters:
+#     #     - image: 2D numpy array [H, W]
+#     #     - size: tuple (longer_side_length, _), e.g., (64, 64)
+#     #
+#     #     Returns:
+#     #     - image_resized: 2D numpy array resized with the longer side equal to size[0]
+#     #     """
+#     #     # Extract original dimensions
+#     #     height, width = image.shape
+#     #
+#     #     # Desired length for the longer side
+#     #     longer_side = size[0]
+#     #
+#     #     # Determine the scaling factor and new dimensions
+#     #     if width > height:
+#     #         new_width = longer_side
+#     #         new_height = int(round((height / width) * longer_side))
+#     #     else:
+#     #         new_height = longer_side
+#     #         new_width = int(round((width / height) * longer_side))
+#     #
+#     #     # Convert to PIL Image for resizing
+#     #     pil_image = Image.fromarray(image)
+#     #
+#     #     # Resize with the new dimensions
+#     #     pil_image = pil_image.resize((new_width, new_height), Image.BILINEAR)
+#     #
+#     #     # Convert back to numpy array
+#     #     image_resized = np.array(pil_image, dtype=np.float32)
+#     #
+#     #     return image_resized
+#
+#
+#
+
+
+
+class LDMOneHDataset(Dataset):
+    def __init__(self, data_dir, image_size=(128, 128), max_samples=None, drop_last=True, modality='image'):
+        """
+        Args:
+            data_dir (str): Path to the directory containing patient folders with 'anat' subdirectories.
+            image_size (tuple): Desired (H, W) size for the final 2D slice image.
+            max_samples (int, optional): Maximum number of random samples to include. If None, use all samples.
+            modality (str): 'image' or 'tabular'.
+                            'image': load and normalize images, generate fake tabular zeros.
+                            'tabular': load and normalize tabular data, generate fake zero images.
+        """
+        self.data_dir = data_dir
+        self.image_size = image_size
+        self.modality = modality
+
+        self.sample_dirs = []
+
+        # behave accordingly for images or tabular
+        common_path = os.path.join(self.data_dir, "rawdata") if modality == 'image' else os.path.join(self.data_dir, "tabular_gen_vfa_net")
+        # rawdata_path = os.path.join(self.data_dir, "rawdata")
+
+        if modality == 'image':
+            # Get list of 'anat' directories under each patient folder
+            for patient_folder in os.listdir(common_path):
+                anat_path = os.path.join(common_path, patient_folder, "anat")
+                if os.path.isdir(anat_path):
+                    self.sample_dirs.append(anat_path)
+
+            if not self.sample_dirs:
+                raise ValueError(f"No sample directories found in {data_dir}")
+        elif modality == 'tabular':
+            for patient_folder in os.listdir(common_path):
+                patient_path = os.path.join(common_path, patient_folder)
+                if os.path.isdir(patient_path):
+                    self.sample_dirs.append(patient_path)
+
+        # If max_samples is specified, randomly select a subset
+        if max_samples is not None:
+            if max_samples > len(self.sample_dirs):
+                raise ValueError(f"max_samples ({max_samples}) cannot exceed total samples ({len(self.sample_dirs)})")
+            self.sample_dirs = random.sample(self.sample_dirs, max_samples)
+
+        # If in tabular mode, set up a scaler and compute normalization parameters
+        if self.modality == 'tabular':
+            self.tabular_scaler = StandardScaler()
+            self.compute_tabular_normalization()
+
+    def compute_tabular_normalization(self):
+        # Collect all tabular data from JSON files to fit the scaler
+        all_tabular_data = []
+        for sample_dir in self.sample_dirs:
+            json_files = glob(os.path.join(sample_dir, '*.json'))
+            if not json_files:
+                continue
+            json_path = json_files[0]
+            with open(json_path, 'r') as f:
+                tabular_data = json.load(f)
+            # Extract the values from the JSON dict
+            values = np.array(*list(tabular_data.values()), dtype=np.float32)
+            all_tabular_data.append(values)
+
+        if not all_tabular_data:
+            raise ValueError("No tabular data found in any sample directories.")
+
+        all_tabular_data = np.array(all_tabular_data, dtype=np.float32)
+        self.tabular_scaler.fit(all_tabular_data)
+
+    def __len__(self):
+        return len(self.sample_dirs)
+
+    def __getitem__(self, idx):
+        sample_dir = self.sample_dirs[idx]
+
+        if self.modality == 'image':
+            # IMAGE MODE: Load and normalize the image, produce fake tabular zeros
+            # Load the NIfTI file
+            nii_files = glob(os.path.join(sample_dir, '*.nii*'))
+            if not nii_files:
+                raise FileNotFoundError(f"No NIfTI files found in {sample_dir}")
+            nii_path = nii_files[0]
+            img_nii = nib.load(nii_path)
+            img_data = img_nii.get_fdata(dtype=np.float32)  # shape: [D, W, H]
+
+            if img_data.ndim != 3:
+                raise ValueError(f"Expected a 3D MRI volume, got shape {img_data.shape}")
+
+            # Select the middle slice along the D dimension
+            mid_slice_idx = img_data.shape[0] // 2
+            img_2d = img_data[mid_slice_idx, ...]  # shape: [W, H]
+
+            # Currently, img_2d is [W, H], we want [H, W]
+            img_2d = img_2d.T  # Now [H, W]
+
+            # Resize the 2D slice
+            img_2d_resized = self.resize_image(img_2d, self.image_size)
+
+            # Normalize (z-score) after resizing
+            mean_val = img_2d_resized.mean()
+            std_val = img_2d_resized.std()
+            if std_val > 1e-6:
+                img_2d_resized = (img_2d_resized - mean_val) / std_val
+            else:
+                img_2d_resized = img_2d_resized - mean_val
+
+            # Replicate the grayscale channel 3 times to get shape [3, H, W]
+            img_tensor = torch.tensor(img_2d_resized, dtype=torch.float32).unsqueeze(0).repeat(3, 1, 1)
+
+            # Fake tabular data: 128 zeros
+            tabular_tensor = torch.zeros(128, dtype=torch.float32)
+
+            return {'image': img_tensor, 'tabular': tabular_tensor}
+
+        elif self.modality == 'tabular':
+            # TABULAR MODE: Load and normalize tabular data, produce fake zero image
+            # Load JSON
+            json_files = glob(os.path.join(sample_dir, '*.json'))
+            if not json_files:
+                raise FileNotFoundError(f"No JSON files found in {sample_dir}")
+            json_path = json_files[0]
+            with open(json_path, 'r') as f:
+                tabular_data = json.load(f)
+
+            # Convert tabular data to array and normalize
+            tabular_values = np.array(list(tabular_data.values()), dtype=np.float32)
+            tabular_values = self.tabular_scaler.transform(tabular_values.reshape(1, -1)).flatten()
+            tabular_tensor = torch.tensor(tabular_values, dtype=torch.float32)
+
+            # Fake image: zeros of shape [3, H, W]
+            img_tensor = torch.zeros((3, self.image_size[0], self.image_size[1]), dtype=torch.float32)
+
+            return {'image': img_tensor, 'tabular': tabular_tensor}
+
+        else:
+            raise ValueError(f"Invalid modality: {self.modality}")
+
+    def resize_image(self, image, size):
+        # image: 2D numpy array [H, W]
+        # size: (H, W) desired
+        pil_image = Image.fromarray(image)
+        pil_image = pil_image.resize(size[::-1], Image.BILINEAR)  # Note: (W, H) for PIL
+        image_resized = np.array(pil_image, dtype=np.float32)
+        return image_resized

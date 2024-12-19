@@ -10012,3 +10012,6 @@ dataset_mimic_multimodal/Lib/site-packages/tqdm-4.55.1.dist-info/WHEEL
 /output/
 dataset_management/dataset_NACC/data/
 /dataset_management/toy_dataset_mnist/data/
+
+/multi_modal_diffusion/scripts/.ipynb_checkpoints
+/multi_modal_diffusion/scripts/output/

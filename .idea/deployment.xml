@@ -1,43 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="remote_prisms" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" showNewOnTargetInSync="false">
+  <component name="PublishConfigData" autoUpload="Always" serverName="giovanni@35.242.219.34:22 key" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" showNewOnTargetInSync="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
       <paths name="giovanni@35.242.219.34:22 key">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" web="/" />
           </mappings>
-        </serverdata>
-      </paths>
-      <paths name="giovanni@35.242.219.34:22 key (2)">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="giovanni_clearbox_ai@35.230.158.131:22 key">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="remote_prisms">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/" local="$PROJECT_DIR$" web="/" />
-            <mapping local="localhost:8888" />
-          </mappings>
-          <excludedPaths>
-            <excludedPath local="true" path="$PROJECT_DIR$/dataset_management/dataset_ABIDE/abide_management" />
-            <excludedPath local="true" path="$PROJECT_DIR$/dataset_management/dataset_MIMIC_CXR_IV/mimic_management" />
-            <excludedPath local="true" path="$PROJECT_DIR$/dataset_management/dataset_MMIST_ccRCC/MMIST_ccRCC_management" />
-            <excludedPath local="true" path="$PROJECT_DIR$/dataset_management/dataset_NACC/NACC_management" />
-            <excludedPath local="true" path="$PROJECT_DIR$/model_garden/vqvae_venv" />
-            <excludedPath local="true" path="$PROJECT_DIR$/output" />
-          </excludedPaths>
         </serverdata>
       </paths>
     </serverData>

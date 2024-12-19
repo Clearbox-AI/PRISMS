@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="Python 3.12 (PRISMS)" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="remote_prisms" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="Remote Python 3.12.7 (sftp://giovanni@35.242.219.34:22/mnt/conda/envs/prisms/bin/python3)" project-jdk-type="Python SDK" />
 </project>

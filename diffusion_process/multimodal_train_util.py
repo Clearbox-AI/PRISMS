@@ -91,7 +91,7 @@ class TrainLoop:
         self.sample_fn = sample_fn
 
         print("DEBUG: Initializing TrainLoop")
-        debug_memory("Init start:")
+        # debug_memory("Init start:")
 
         self._load_and_sync_parameters()
 
@@ -122,7 +122,7 @@ class TrainLoop:
         # Properly enable DDP if in a distributed environment
         if dist.is_initialized() and dist_util.get_world_size() > 1:
             print("DEBUG: Initializing DDP")
-            debug_memory("Before DDP:")
+            # debug_memory("Before DDP:")
             # Ensure device_ids is an integer index if needed
             local_rank = dist_util.dev().index if dist_util.dev().type == 'cuda' else None
             if local_rank is None:
@@ -135,10 +135,10 @@ class TrainLoop:
                 output_device=dist_util.dev(),
                 broadcast_buffers=False,
                 bucket_cap_mb=128,
-                find_unused_parameters=False,
+                find_unused_parameters=True,
             )
             dist_util.sync_params(self.ddp_model.parameters())
-            debug_memory("After DDP:")
+            # debug_memory("After DDP:")
 
         else:
             if dist_util.get_world_size() > 1:
@@ -149,7 +149,7 @@ class TrainLoop:
             self.use_ddp = False
             self.ddp_model = self.model
 
-        debug_memory("Init end:")
+        # debug_memory("Init end:")
 
     def output_model_stastics(self):
         num_params_total = sum(p.numel() for p in self.model.parameters())
@@ -232,9 +232,9 @@ class TrainLoop:
                 self.data.sampler.set_epoch(epoch)
 
             for batch in self.data:
-                debug_memory(f"Before run_step (epoch {epoch + 1}, step {self.step}):")
+                # debug_memory(f"Before run_step (epoch {epoch + 1}, step {self.step}):")
                 loss = self.run_step(batch)
-                debug_memory(f"After run_step (epoch {epoch + 1}, step {self.step}):")
+                # debug_memory(f"After run_step (epoch {epoch + 1}, step {self.step}):")
 
                 if not dist.is_initialized():
                     print(f"Epoch {epoch + 1}, Step {self.step}, Loss: {loss}")
@@ -248,7 +248,7 @@ class TrainLoop:
 
                 if self.step % self.save_interval == 0:
                     # TODO REMOVED SAVING
-                    # self.save()
+                    self.save()
                     ...
                     # Run for a finite amount of time in integration tests.
 
@@ -265,16 +265,16 @@ class TrainLoop:
 
             # evaluation step
             if (epoch + 1) % self.eval_interval == 0:
-                debug_memory("Before evaluate_model:")
+                # debug_memory("Before evaluate_model:")
                 self.evaluate_model(epoch)
-                debug_memory("After evaluate_model:")
+                # debug_memory("After evaluate_model:")
                 logger.dumpkvs()
 
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
-            debug_memory("Before final save:")
+            # debug_memory("Before final save:")
             self.save()
-            debug_memory("After final save:")
+            # debug_memory("After final save:")
 
         plot_metrics()
 

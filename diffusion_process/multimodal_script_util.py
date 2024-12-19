@@ -8,6 +8,7 @@ from diffusion_process import multimodal_gaussian_diffusion as gd
 from diffusion_process.multimodal_respace import SpacedDiffusion, space_timesteps
 from multi_modal_diffusion.model.mm_unet import MultimodalUNet
 import torch as th
+from multi_modal_diffusion.architecture_utils.layers_classification import freeze_modality
 
 
 def diffusion_defaults():
@@ -52,6 +53,7 @@ def model_defaults():
         use_fp16=False,
         image_type="2d",  # Changed from "2d+1d" to "2d"
         tabular_type="1d",
+        freeze_mod="only_image" # here put what you want to freeze
     )
     return res
 
@@ -91,7 +93,8 @@ def create_model_and_diffusion(
         use_fp16,
         image_type="2d",
         tabular_type="1d",
-        class_cond=False
+        class_cond=False,
+        freeze_mod=None
 ):
     model = create_model(
         image_size=image_size,
@@ -111,7 +114,8 @@ def create_model_and_diffusion(
         use_scale_shift_norm=use_scale_shift_norm,
         dropout=dropout,
         resblock_updown=resblock_updown,
-        use_fp16=use_fp16
+        use_fp16=use_fp16,
+        freeze_mod=freeze_mod
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -144,7 +148,8 @@ def create_model(
         use_scale_shift_norm=False,
         dropout=0,
         use_fp16=False,
-        resblock_updown=True
+        resblock_updown=True,
+        freeze_mod=None
 ):
     # Parse sizes
     image_size = tuple(int(x) for x in image_size.split(','))
@@ -190,7 +195,10 @@ def create_model(
         use_scale_shift_norm=use_scale_shift_norm,
         resblock_updown=resblock_updown
     )
-    freeze_tabular_layers(unet_model, freeze=True)
+
+    if freeze_mod:
+        freeze_modality(unet_model, modality=freeze_mod, debug=True)
+
     return unet_model
 
 
@@ -261,34 +269,6 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError("boolean value expected")
-
-def freeze_tabular_layers(model, freeze=True):
-    """
-    Freeze or unfreeze all tabular-related layers in the given model.
-    This function searches through named_parameters and sets requires_grad accordingly.
-    """
-    # Substrings that appear in tabular-only layer names:
-    tabular_substrings = [
-        "tabular_in_layers",
-        "tabular_out_layers",
-        "tabular_skip_connection",
-        "tabular_mlp",      # Matches instances like 'tabular_mlp.mlp'
-        "tab_upd",
-        "tab_norm",
-        "tab_qkv",
-        "tab_proj_out",
-        "tabular_out",      # Final tabular output MLP
-        "TabularMLP",       # Matches module-level naming
-    ]
-
-    for name, param in model.named_parameters():
-        # Check if any of the tabular-specific substrings is in the parameter name
-        if any(s in name for s in tabular_substrings):
-            param.requires_grad = not freeze
-            out = "FREEZE"
-        else:
-            out = "normal"
-        # print(f"- {name}: {out}")
 
 
 if __name__ == "__main__":
