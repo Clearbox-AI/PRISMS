@@ -16,6 +16,59 @@ from torch.utils.data import Dataset
 from glob import glob
 import nibabel as nib
 from sklearn.preprocessing import StandardScaler
+from torch.utils.data.distributed import DistributedSampler
+from multi_modal_diffusion import dist_util
+
+from diffusion_process.enums import DatasetType
+
+def load_training_data(args):
+    """
+    Load training data based on the chosen dataset type.
+    `args.dataset_type` should be a value from DatasetType enum.
+    Additional dataset-specific parameters can be included in args.
+    """
+
+    # You can add dataset-specific argument parsing or defaults in your config if needed
+    # For example, args could have fields like args.image_size, args.max_samples, etc.
+
+    if args.dataset_type == DatasetType.IMAGE_TABULAR:
+        dataset = ImageTabularDataset(
+            data_dir=args.data_dir,
+            image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') and hasattr(args, 'image_width')
+            else (64, 64)
+        )
+    elif args.dataset_type == DatasetType.TOY_MNIST:
+        dataset = ToyMNISTDataset(
+            data_dir=args.data_dir,
+            resize_to=(args.toy_resize_height, args.toy_resize_width) if hasattr(args, 'toy_resize_height') else (32, 32)
+        )
+    elif args.dataset_type == DatasetType.EXP_LUMIR:
+        dataset = ExpLumirDataset(
+            data_dir=args.data_dir,
+            image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') else (64, 64),
+            max_samples=args.max_samples if hasattr(args, 'max_samples') else None
+        )
+    elif args.dataset_type == DatasetType.LDM_ONE_H:
+        dataset = LDMOneHDataset(
+            data_dir=args.data_dir,
+            image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') else (64, 64),
+            modality=args.modality if hasattr(args, 'modality') else "tabular"
+        )
+    else:
+        raise ValueError(f"Unsupported dataset type: {args.dataset_type}")
+
+    sampler = DistributedSampler(dataset) if dist_util.get_world_size() > 1 else None
+    data_loader = th.utils.data.DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=(sampler is None),
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+        sampler=sampler,
+    )
+    return data_loader
+
 
 class ImageTabularDataset(Dataset):
     def __init__(self, data_dir, image_size=(256, 256)):
@@ -61,6 +114,7 @@ class ImageTabularDataset(Dataset):
         image = (image - mean) / std
 
         # # TODO
+        # import matplotlib.pyplot as plt
         # # Visualize the 2D image
         # plt.figure()
         # plt.imshow(image, cmap='gray')

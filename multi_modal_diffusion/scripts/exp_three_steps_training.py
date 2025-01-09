@@ -4,20 +4,20 @@ import argparse
 
 from multi_modal_diffusion.common import set_seed_logger_random
 from multi_modal_diffusion import dist_util, logger
-from diffusion_process.multimodal_script_util import (
+from multi_modal_diffusion.configs.defaults import (
     model_and_diffusion_defaults,
-    create_model_and_diffusion,
     args_to_dict,
+    create_argparser,
     add_dict_to_argparser
 )
-from multi_modal_diffusion.scripts.mm_training import create_argparser
+from multi_modal_diffusion.model.model_setup import create_model_and_diffusion
 from multi_modal_diffusion.architecture_utils.layers_initialization import reinitialize_specific_layers
 from multi_modal_diffusion.architecture_utils.layers_classification import classify_parameters
-from multi_modal_diffusion.scripts.mm_training import load_training_data
+from diffusion_process.dataloaders import load_training_data
 from diffusion_process.multimodal_train_util import TrainLoop
 from multi_modal_diffusion.resample import create_named_schedule_sampler
 
-RESTORE_MODEL_PATH = "/mnt/storage/lumir_three_stage_exp/stage_one"
+RESTORE_MODEL_PATH = "/mnt/storage/lumir_three_stage_exp/stage_two"
 
 def get_checkpoints(restore_path):
 

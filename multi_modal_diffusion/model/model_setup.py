@@ -2,67 +2,11 @@
 This code is extended from guided_diffusion: https://github.com/openai/guided-diffusion/blob/main/guided_diffusion/scripts_util.py
 """
 
-import argparse
+from multi_modal_diffusion.model.mm_unet import MultimodalUNet
+from multi_modal_diffusion.architecture_utils.layers_classification import freeze_modality
 from einops import rearrange
 from diffusion_process import multimodal_gaussian_diffusion as gd
 from diffusion_process.multimodal_respace import SpacedDiffusion, space_timesteps
-from multi_modal_diffusion.model.mm_unet import MultimodalUNet
-import torch as th
-from multi_modal_diffusion.architecture_utils.layers_classification import freeze_modality
-
-
-def diffusion_defaults():
-    """
-    Defaults for multi-modal training.
-    """
-    return dict(
-        learn_sigma=False,
-        diffusion_steps=1000,
-        noise_schedule="linear",
-        timestep_respacing="",
-        use_kl=False,
-        predict_xstart=False,
-        rescale_timesteps=False,
-        rescale_learned_sigmas=False,
-    )
-
-
-def model_defaults():
-    """
-    Defaults for multi-modal training.
-    """
-    res = dict(
-        image_size="3,64,64",  # Changed from "16,3,64,64" to "3,64,64"
-        tabular_size="96",
-        num_channels=192,
-        num_res_blocks=1, #2
-        num_heads=2, #2
-        num_heads_upsample=-1,
-        num_head_channels=-1,
-        cross_attention_resolutions="4,8,16", # 2,4,8
-        cross_attention_windows="1,1,1", # 1,4,8
-        cross_attention_shift=False, # True
-        image_attention_resolutions="2,4,8,16", # 2,4,8
-        tabular_attention_resolutions="2,4,8,16", # -1
-        channel_mult="1,2,3,4", # ""
-        dropout=0.0,
-        class_cond=False,
-        use_checkpoint=False,
-        use_scale_shift_norm=True,
-        resblock_updown=True, # False
-        use_fp16=False,
-        image_type="2d",  # Changed from "2d+1d" to "2d"
-        tabular_type="1d",
-        freeze_mod="only_image" # here put what you want to freeze
-    )
-    return res
-
-
-def model_and_diffusion_defaults():
-    res = model_defaults()
-    res.update(diffusion_defaults())
-    return res
-
 
 def create_model_and_diffusion(
         image_size,
@@ -94,7 +38,8 @@ def create_model_and_diffusion(
         image_type="2d",
         tabular_type="1d",
         class_cond=False,
-        freeze_mod=None
+        freeze_mod=None,
+        **kwargs
 ):
     model = create_model(
         image_size=image_size,
@@ -241,69 +186,3 @@ def create_gaussian_diffusion(
         loss_type=loss_type,
         rescale_timesteps=rescale_timesteps,
     )
-
-
-def add_dict_to_argparser(parser, default_dict):
-    for k, v in default_dict.items():
-        v_type = type(v)
-        if v is None:
-            v_type = str
-        elif isinstance(v, bool):
-            v_type = str2bool
-        parser.add_argument(f"--{k}", default=v, type=v_type)
-
-
-def args_to_dict(args, keys):
-    return {k: getattr(args, k) for k in keys}
-
-
-def str2bool(v):
-    """
-    https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse
-    """
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("boolean value expected")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    defaults = model_and_diffusion_defaults()
-    add_dict_to_argparser(parser, defaults)
-    args = parser.parse_args()
-
-    # Convert args to a dictionary
-    args_dict = args_to_dict(args, list(defaults.keys()))
-
-    # Create model and diffusion
-    model, diffusion = create_model_and_diffusion(**args_dict)
-
-    # Print model and diffusion to verify creation
-    print("Model created:")
-    print(model)
-    print("\nDiffusion process created:")
-    print(diffusion)
-
-    # Example usage:
-    # Create dummy input data
-    batch_size = 4
-    image_channels, image_height, image_width = map(int, args.image_size.split(','))
-    tabular_size = int(args.tabular_size)
-
-    # Create random tensors as dummy inputs
-    image_input = th.randn(batch_size, image_channels, image_height, image_width)
-    tabular_input = th.randn(batch_size, tabular_size)
-
-    # Dummy timesteps
-    t = th.randint(low=0, high=diffusion.num_timesteps, size=(batch_size,))
-
-    # Run the model
-    model_output = model(image_input, tabular_input, t)
-
-    print("\nModel output:")
-    print(model_output)

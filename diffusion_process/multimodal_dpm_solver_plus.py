@@ -437,11 +437,32 @@ class DPM_Solver:
         self.max_val = max_val
         self.rescale = rescale
 
+    # def noise_prediction_fn(self, x, t):
+    #     """
+    #     Return the noise prediction model.
+    #     """
+    #     return self.model(x, t)
+
     def noise_prediction_fn(self, x, t):
-        """
-        Return the noise prediction model.
-        """
-        return self.model(x, t)
+        # 1) get the raw output from the wrapped model
+        out = self.model(x, t)
+
+        # 2) If the model has 6 channels in "image", split them (just like you did):
+        if out["image"].shape[1] == 6:
+            noise_pred, sigma_pred = torch.split(out["image"], 3, dim=1)
+            out["image"] = noise_pred  # shape [B,3,H,W]
+            out["image_sigma"] = sigma_pred  # shape [B,3,H,W]
+
+        # 3) Do the same for tabular if it has 2× the features
+        input_tab_feats = x["tabular"].shape[1]
+        output_tab_feats = out["tabular"].shape[1]
+        if output_tab_feats == 2 * input_tab_feats:
+            half_feats = output_tab_feats // 2
+            noise_tab, sigma_tab = torch.split(out["tabular"], half_feats, dim=1)
+            out["tabular"] = noise_tab
+            out["tabular_sigma"] = sigma_tab
+
+        return out
 
     def data_prediction_fn(self, x, t):
         """
@@ -901,7 +922,7 @@ class DPM_Solver:
 
                 tabular_x_t = (
                         expand_dims(torch.exp(log_alpha_t - log_alpha_s), tabular_dims) * x["tabular"]
-                        - expand_dims(sigma_t * phi_1, image_dims) * model_s["tabular"]
+                        - expand_dims(sigma_t * phi_1, tabular_dims) * model_s["tabular"]
                         - (1. / r2) * expand_dims(sigma_t * phi_2, tabular_dims) * (
                                     model_s2["tabular"] - model_s["tabular"])
                 )
@@ -923,7 +944,7 @@ class DPM_Solver:
                 tabular_D2 = 2. * (tabular_D1_1 - tabular_D1_0) / (r2 - r1)
                 tabular_x_t = (
                         expand_dims(torch.exp(log_alpha_t - log_alpha_s), tabular_dims) * x["tabular"]
-                        - expand_dims(sigma_t * phi_1, tabular_dims) * model_s["audio"]
+                        - expand_dims(sigma_t * phi_1, tabular_dims) * model_s["tabular"]
                         - expand_dims(sigma_t * phi_2, tabular_dims) * tabular_D1
                         - expand_dims(sigma_t * phi_3, tabular_dims) * tabular_D2
                 )
