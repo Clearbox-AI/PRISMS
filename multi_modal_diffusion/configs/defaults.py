@@ -16,7 +16,7 @@ def get_default_config():
     config.update(
         dict(
             data_dir="",
-            dataset_type=DatasetType.IMAGE_TABULAR,
+            dataset_type=DatasetType.NACC_LATENTS,
             schedule_sampler="uniform",
             lr=1e-4,
             t_lr=1e-4,
@@ -29,8 +29,8 @@ def get_default_config():
             ema_rate="0.9999",
             log_interval=10,
             devices=None,
-            save_interval=500,
-            output_dir="/mnt/storage/nacc_sub/exp_arch/try_mean_kl_freeze",
+            save_interval=300,
+            output_dir="/mnt/storage/nacc_sub/tmp",
             resume_checkpoint="",
             use_fp16=False,
             fp16_scale_growth=1e-3,

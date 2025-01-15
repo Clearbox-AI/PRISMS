@@ -10015,3 +10015,5 @@ dataset_management/dataset_NACC/data/
 
 /multi_modal_diffusion/scripts/.ipynb_checkpoints
 /multi_modal_diffusion/scripts/output/
+
+/model_garden/microsoft_mri_autoencoder_01/weights

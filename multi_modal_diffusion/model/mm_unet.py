@@ -1061,21 +1061,113 @@ class MultimodalUNet(nn.Module):
 
 
 
+# if __name__ == '__main__':
+#
+#     from torch.utils.data import DataLoader
+#     from multi_modal_diffusion.scripts.mm_training import ImageTabularDataset
+#     import time
+#
+#     # Set device
+#     device = th.device('cpu')  # Using CPU
+#
+#     # Model configuration parameters
+#     model_channels = 192
+#     emb_channels = 128
+#     image_size = [3, 64, 64]  # Channels, Height, Width for image data
+#     tabular_size = 174          # Number of features in tabular data (1D tensor)
+#     image_out_channels = 3
+#     tabular_out_channels = 174  # Must match the tabular_size
+#     num_heads = 2
+#     num_res_blocks = 1
+#     cross_attention_resolutions = [4, 8, 16]
+#     image_attention_resolutions = [2, 4, 8, 16]
+#     tabular_attention_resolutions = [2, 4, 8, 16]
+#     lr = 0.0001
+#     channel_mult = (1, 2, 3, 4)
+#
+#     # Initialize the model
+#     model = MultimodalUNet(
+#         image_size=image_size,
+#         tabular_size=tabular_size,
+#         model_channels=model_channels,
+#         image_out_channels=image_out_channels,
+#         tabular_out_channels=tabular_out_channels,
+#         num_res_blocks=num_res_blocks,
+#         cross_attention_resolutions=cross_attention_resolutions,
+#         num_heads=num_heads,
+#         image_attention_resolutions=image_attention_resolutions,
+#         tabular_attention_resolutions=tabular_attention_resolutions,
+#         use_scale_shift_norm=True,
+#         use_checkpoint=True
+#     ).to(device)
+#
+#     # Optimizer
+#     optim = th.optim.SGD(model.parameters(), lr=lr)
+#
+#     # Data loading parameters
+#     data_dir = r'D:\clearboxAI\NACC\extracted_dataset'  # Replace with the actual data directory
+#     batch_size = 1  # Adjust as needed
+#     num_workers = 0  # Number of subprocesses to use for data loading
+#
+#     # Create dataset and data loader
+#     dataset = ImageTabularDataset(data_dir, image_size=(64, 64))
+#     data_loader = DataLoader(
+#         dataset,
+#         batch_size=batch_size,
+#         shuffle=True,
+#         num_workers=num_workers,
+#         pin_memory=True,
+#         drop_last=True,
+#     )
+#
+#     # Training loop
+#     model.train()
+#     while True:
+#         for batch in data_loader:
+#             # Record the start time
+#             time_start = time.time()
+#
+#             # Extract image and tabular data, and move to device
+#             image = batch['image'].to(device)  # [batch_size, channels, height, width]
+#             tabular = batch['tabular'].to(device)  # [batch_size, features]
+#
+#             # Define timesteps (using a dummy value of 1)
+#             timesteps = th.ones(image.size(0), dtype=th.long).to(device)
+#
+#             # Forward pass
+#             image_out, tabular_out = model(image, tabular, timesteps)
+#
+#             # Use the inputs as targets (autoencoder-like setup)
+#             image_target = image
+#             tabular_target = tabular
+#
+#             # Compute loss
+#             loss = F.mse_loss(image_out, image_target) + F.mse_loss(tabular_out, tabular_target)
+#
+#             # Backpropagation
+#             optim.zero_grad()
+#             loss.backward()
+#             optim.step()
+#
+#             # Logging
+#             print(f"Loss: {loss.item():.6f} | Time: {time.time() - time_start:.4f} seconds")
+
+
 if __name__ == '__main__':
 
-    from torch.utils.data import DataLoader
-    from multi_modal_diffusion.scripts.mm_training import ImageTabularDataset
     import time
+    import torch as th
+    import torch.nn.functional as F
 
     # Set device
-    device = th.device('cpu')  # Using CPU
+    device = th.device("cuda:0") if th.cuda.is_available() else th.device('cpu')
 
     # Model configuration parameters
     model_channels = 192
     emb_channels = 128
-    image_size = [3, 64, 64]  # Channels, Height, Width for image data
+    image_size = [4, 64, 64]  # Channels, Height, Width for image data
     tabular_size = 174          # Number of features in tabular data (1D tensor)
-    image_out_channels = 3
+    image_out_channels = 4
     tabular_out_channels = 174  # Must match the tabular_size
     num_heads = 2
     num_res_blocks = 1
@@ -1104,51 +1196,34 @@ if __name__ == '__main__':
     # Optimizer
     optim = th.optim.SGD(model.parameters(), lr=lr)
 
-    # Data loading parameters
-    data_dir = r'D:\clearboxAI\NACC\extracted_dataset'  # Replace with the actual data directory
-    batch_size = 1  # Adjust as needed
-    num_workers = 0  # Number of subprocesses to use for data loading
-
-    # Create dataset and data loader
-    dataset = ImageTabularDataset(data_dir, image_size=(64, 64))
-    data_loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
-    )
-
     # Training loop
     model.train()
     while True:
-        for batch in data_loader:
-            # Record the start time
-            time_start = time.time()
+        # Generate random image and tabular data
+        image = th.randn(1, 4, 64, 64).to(device)  # Random image of shape [1, 4, 64, 64]
+        tabular = th.randn(1, tabular_size).to(device)  # Random tabular data of shape [1, tabular_size]
 
-            # Extract image and tabular data, and move to device
-            image = batch['image'].to(device)  # [batch_size, channels, height, width]
-            tabular = batch['tabular'].to(device)  # [batch_size, features]
+        # Record the start time
+        time_start = time.time()
 
-            # Define timesteps (using a dummy value of 1)
-            timesteps = th.ones(image.size(0), dtype=th.long).to(device)
+        # Define timesteps (using a dummy value of 1)
+        timesteps = th.ones(image.size(0), dtype=th.long).to(device)
 
-            # Forward pass
-            image_out, tabular_out = model(image, tabular, timesteps)
+        # Forward pass
+        image_out, tabular_out = model(image, tabular, timesteps)
 
-            # Use the inputs as targets (autoencoder-like setup)
-            image_target = image
-            tabular_target = tabular
+        # Use the inputs as targets (autoencoder-like setup)
+        image_target = image
+        tabular_target = tabular
 
-            # Compute loss
-            loss = F.mse_loss(image_out, image_target) + F.mse_loss(tabular_out, tabular_target)
+        # Compute loss
+        loss = F.mse_loss(image_out, image_target) + F.mse_loss(tabular_out, tabular_target)
 
-            # Backpropagation
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
+        # Backpropagation
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
 
-            # Logging
-            print(f"Loss: {loss.item():.6f} | Time: {time.time() - time_start:.4f} seconds")
+        # Logging
+        print(f"Loss: {loss.item():.6f} | Time: {time.time() - time_start:.4f} seconds")
 

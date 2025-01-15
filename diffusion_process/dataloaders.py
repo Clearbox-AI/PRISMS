@@ -37,6 +37,12 @@ def load_training_data(args):
             image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') and hasattr(args, 'image_width')
             else (64, 64)
         )
+    elif args.dataset_type == DatasetType.NACC_LATENTS:
+        dataset = NaccLatentsDataset(
+            data_dir=args.data_dir,
+            image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') and hasattr(args,'image_width')
+            else (64, 64)
+        )
     elif args.dataset_type == DatasetType.TOY_MNIST:
         dataset = ToyMNISTDataset(
             data_dir=args.data_dir,
@@ -267,6 +273,328 @@ class ImageTabularDataset(Dataset):
         # Prevent division by zero
         std[std == 0] = 1.0
         return mean, std
+
+
+
+# NACC WITH LATENTS [1, 4, 64, 64]
+
+class NaccLatentsDataset(Dataset):
+    """
+    A dataset class for latents shaped [1, 4, H, W] that need to be resized
+    to a square for a UNet, while only normalizing tabular (JSON) data.
+
+    Steps:
+      1) Load .npy file with shape [1, 4, H, W].
+      2) Remove the first dimension -> [4, H, W].
+      3) Move channels to the end -> [H, W, 4] to use PIL for resizing.
+      4) Resize to a fixed square (e.g. 64x64).
+      5) Move channels back to front -> [4, 64, 64].
+      6) Return as a torch tensor without normalizing the latents.
+      7) Load JSON data and apply StandardScaler for tabular fields.
+    """
+    def __init__(self, data_dir, image_size=(64, 64)):
+        """
+        Args:
+            data_dir (str): Root directory containing subfolders, each with one .npy (latents) and an optional .json.
+            image_size (tuple): (H, W) shape to which we resize the latents.
+        """
+        self.data_dir = data_dir
+        self.out_size = image_size  # e.g. (64, 64)
+
+        # List of patient directories
+        self.patient_dirs = [
+            os.path.join(data_dir, d) for d in os.listdir(data_dir)
+            if os.path.isdir(os.path.join(data_dir, d))
+        ]
+        if not self.patient_dirs:
+            raise ValueError(f"No patient directories found in {data_dir}")
+
+        # StandardScaler for tabular data
+        self.tabular_scaler = StandardScaler()
+
+        # Attributes to store global min/max of latents
+        self.global_latent_min = float('inf')
+        self.global_latent_max = float('-inf')
+
+        # Fit the scaler on any tabular data in the dataset
+        self.compute_tabular_normalization()
+
+        # Compute global min/max for latents across the dataset
+        self.compute_latent_minmax()
+
+    def __len__(self):
+        return len(self.patient_dirs)
+
+    def __getitem__(self, idx):
+        """
+        Returns a dict with:
+          - 'latents': shape [4, image_size[0], image_size[1]] as a torch.Tensor (float32)
+          - 'tabular': shape [N] as a torch.Tensor (float32), if JSON data is found
+        """
+        patient_dir = self.patient_dirs[idx]
+
+        # 1) Load latents, shape [1, 4, H, W]
+        latents_path = self._find_npy_file(patient_dir)
+        latents_np = np.load(latents_path)
+        if latents_np.shape[0] != 1 or latents_np.shape[1] != 4:
+            raise ValueError(
+                f"Expected latents shape [1, 4, H, W], got {latents_np.shape} in {latents_path}"
+            )
+
+        # Remove first dimension -> [4, H, W]
+        latents_np = latents_np[0]  # now shape: [4, H, W]
+
+        # TODO: TRY THIS
+        # latents_np = np.repeat(latents_np[:1], 3, axis=0)
+
+
+        # 2) Resize latents to image_size (H,W), while preserving channels = 4
+        # latents_np = self._resize_latents(latents_np)  # shape => [4, image_size[0], image_size[1]]
+
+        # Normalize latents to [-1, 1] using the global min/max
+        latents_np = self._normalize_latents(latents_np)
+
+        # Convert latents to torch tensor
+        latents_torch = torch.from_numpy(latents_np.astype(np.float32))
+
+        # 3) Load & scale tabular data from JSON
+        tabular_data = self._load_tabular_data(patient_dir)
+
+        return {
+            'image': latents_torch,  # [4, image_size[0], image_size[1]]
+            'tabular': tabular_data    # e.g. shape [N], or empty if none found
+        }
+
+    def _find_npy_file(self, patient_dir):
+        """Find the .npy file in a patient directory."""
+        latents_files = glob(os.path.join(patient_dir, '*.npy'))
+        if not latents_files:
+            raise FileNotFoundError(f"No .npy files found in {patient_dir}")
+        return latents_files[0]
+
+    def _resize_latents(self, latents: np.ndarray) -> np.ndarray:
+        """
+        latents shape: [4, H, W].
+        We want to resize to [4, image_size[0], image_size[1]].
+
+        We'll:
+          1) move channels last -> [H, W, 4],
+          2) use PIL to resize to image_size,
+          3) move channels back -> [4, image_size[0], image_size[1]].
+        """
+        # Move channels to last dimension: [H, W, 4]
+        latents_ch_last = np.transpose(latents, (1, 2, 0))
+
+        # Convert to PIL Image (must be float32, 8-bit, or others; float32 works)
+        # But PIL expects channel dimension in [1,3,4]. We have 4, so this is okay
+        # (RGBA interpretation if you consider them as an image).
+        latents_pil = Image.fromarray(latents_ch_last)
+
+        # Resize to image_size
+        latents_pil = latents_pil.resize(self.image_size[::-1], Image.BILINEAR)
+
+        # Convert back to numpy array, shape [out_H, out_W, 4]
+        latents_resized_ch_last = np.array(latents_pil, dtype=np.float32)
+
+        # Move channels to front: [4, out_H, out_W]
+        latents_resized = np.transpose(latents_resized_ch_last, (2, 0, 1))
+        return latents_resized
+
+    def _load_tabular_data(self, patient_dir: str) -> torch.Tensor:
+        """Load JSON data, scale it with StandardScaler, and return as torch.Tensor."""
+        json_files = glob(os.path.join(patient_dir, '*.json'))
+        if not json_files:
+            # No JSON => return empty tensor
+            return torch.empty(0, dtype=torch.float32)
+
+        json_path = json_files[0]
+        with open(json_path, 'r') as f:
+            json_data = json.load(f)
+
+        # Example extraction: either 'patient_id' or the first value
+        tabular_vals = json_data.get('patient_id', list(json_data.values())[0])
+        if not isinstance(tabular_vals, (list, tuple)):
+            # If there's no numeric data, return empty
+            return torch.empty(0, dtype=torch.float32)
+
+        tabular_np = np.array(tabular_vals, dtype=np.float32).reshape(1, -1)
+        tabular_scaled = self.tabular_scaler.transform(tabular_np).flatten()
+        return torch.from_numpy(tabular_scaled)
+
+    def compute_tabular_normalization(self):
+        """
+        Go through each patient directory, gather all tabular arrays, and
+        fit the StandardScaler.
+        """
+        all_tabular = []
+        for patient_dir in self.patient_dirs:
+            json_files = glob(os.path.join(patient_dir, '*.json'))
+            if not json_files:
+                continue
+            with open(json_files[0], 'r') as f:
+                json_data = json.load(f)
+            vals = json_data.get('patient_id', list(json_data.values())[0])
+            if isinstance(vals, (list, tuple)):
+                all_tabular.append(vals)
+
+        if not all_tabular:
+            # No tabular data found, fit on dummy to avoid errors
+            self.tabular_scaler.fit([[0.0]])
+            return
+
+        all_tabular_np = np.array(all_tabular, dtype=np.float32)
+        self.tabular_scaler.fit(all_tabular_np)
+
+    def compute_latent_minmax(self):
+        """
+        Make one pass through the dataset to get global min/max.
+        This will let us do a consistent [-1, 1] scaling in __getitem__.
+        """
+        for patient_dir in self.patient_dirs:
+            latents_path = self._find_npy_file(patient_dir)
+            latents_np = np.load(latents_path)  # shape [1, 4, H, W]
+            latents_np = latents_np[0]          # => [4, H, W]
+
+            curr_min = latents_np.min()
+            curr_max = latents_np.max()
+            if curr_min < self.global_latent_min:
+                self.global_latent_min = curr_min
+            if curr_max > self.global_latent_max:
+                self.global_latent_max = curr_max
+
+        # Edge case: if global_min == global_max, avoid divide-by-zero
+        if self.global_latent_min == self.global_latent_max:
+            # Arbitrarily set them to min-1 and min+1, or skip normalization
+            self.global_latent_min -= 1e-6
+            self.global_latent_max += 1e-6
+
+    # # normalize latents array to [-1, 1]
+    def _normalize_latents(self, latents: np.ndarray) -> np.ndarray:
+        """
+        Given latents in shape [4, H, W] and the precomputed global min/max,
+        scale to [-1, 1].
+        """
+        # If you already handled edge case above, this is safe:
+        latents = 2.0 * (latents - self.global_latent_min) \
+                  / (self.global_latent_max - self.global_latent_min) - 1.0
+        return latents
+
+    # normalize latents array to [0, 255]
+    # def _normalize_latents(self, latents: np.ndarray) -> np.ndarray:
+    #     """
+    #     Given latents in shape [4, H, W] and the precomputed global min/max,
+    #     scale to [0, 255].
+    #
+    #     Args:
+    #         latents (np.ndarray): Input latents with shape [4, H, W].
+    #
+    #     Returns:
+    #         np.ndarray: Normalized latents scaled to [0, 255].
+    #     """
+    #     # Compute the range using precomputed global min and max
+    #     range_val = self.global_latent_max - self.global_latent_min
+    #
+    #     if range_val == 0:
+    #         # Avoid division by zero if all values are the same
+    #         normalized_latents = np.zeros_like(latents)
+    #     else:
+    #         # Scale latents to [0, 255]
+    #         normalized_latents = (latents - self.global_latent_min) / range_val * 255.0
+    #
+    #     return normalized_latents
+
+
+
+
+
+# TOY MNIST
+
+class ToyMNISTDataset(Dataset):
+    def __init__(self, data_dir, resize_to=(32, 32)):
+        """
+        Args:
+            data_dir (str): Path to the directory containing subdirectories for each sample.
+                            Each subdirectory should contain an image (as .png) and a corresponding tabular .json file.
+            resize_to (tuple): Desired output size of the images (height, width).
+        """
+        self.data_dir = data_dir
+        self.resize_to = resize_to
+
+        # Get list of sample directories
+        self.sample_dirs = [
+            os.path.join(data_dir, d) for d in os.listdir(data_dir)
+            if os.path.isdir(os.path.join(data_dir, d))
+        ]
+        if not self.sample_dirs:
+            raise ValueError(f"No sample directories found in {data_dir}")
+
+        # Initialize StandardScaler for tabular data
+        self.tabular_scaler = StandardScaler()
+
+        # Compute tabular normalization parameters
+        self.compute_tabular_normalization()
+
+        # Initialize transformation for images
+        self.image_transform = transforms.Compose([
+            transforms.Resize(self.resize_to),   # Resize images to desired size
+            transforms.ToTensor(),              # Convert PIL image to Tensor and scale pixel values to [0, 1]
+            transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Replicate the grayscale channel 3 times
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize images to range [-1, 1]
+        ])
+
+    def __len__(self):
+        return len(self.sample_dirs)
+
+    def __getitem__(self, idx):
+        sample_dir = self.sample_dirs[idx]
+
+        # Load image data
+        image_files = glob(os.path.join(sample_dir, '*.png'))
+        if not image_files:
+            raise FileNotFoundError(f"No image .png files found in {sample_dir}")
+        image_path = image_files[0]
+
+        # Open image using PIL and convert to grayscale
+        image = Image.open(image_path).convert('L')  # Convert to grayscale
+
+        # Apply transformations to the image
+        image = self.image_transform(image)  # Shape: [3, H, W]
+
+        # Load tabular data
+        json_files = glob(os.path.join(sample_dir, '*.json'))
+        if not json_files:
+            raise FileNotFoundError(f"No JSON files found in {sample_dir}")
+        json_path = json_files[0]
+        with open(json_path, 'r') as f:
+            tabular_data = json.load(f)
+
+        # Convert tabular data to numpy array
+        tabular_values = np.array(list(tabular_data.values()), dtype=np.float32)
+        tabular_values = self.tabular_scaler.transform(tabular_values.reshape(1, -1)).flatten()
+
+        # Convert to torch tensor
+        tabular_tensor = torch.tensor(tabular_values, dtype=torch.float32)
+
+        return {'image': image, 'tabular': tabular_tensor}
+
+    def compute_tabular_normalization(self):
+        # Collect all tabular data
+        all_tabular_data = []
+        for sample_dir in self.sample_dirs:
+            json_files = glob(os.path.join(sample_dir, '*.json'))
+            if not json_files:
+                continue
+            json_path = json_files[0]
+            with open(json_path, 'r') as f:
+                tabular_data = json.load(f)
+            all_tabular_data.append(list(tabular_data.values()))
+        if not all_tabular_data:
+            raise ValueError("No tabular data found in any sample directories.")
+        all_tabular_data = np.array(all_tabular_data, dtype=np.float32)
+
+        # Fit the scaler
+        self.tabular_scaler.fit(all_tabular_data)
+
 
 
 # TOY MNIST

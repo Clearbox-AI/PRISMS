@@ -421,7 +421,7 @@ class DPM_Solver:
         [1] Chitwan Saharia, William Chan, Saurabh Saxena, Lala Li, Jay Whang, Emily Denton, Seyed Kamyar Seyed Ghasemipour, Burcu Karagol Ayan, S Sara Mahdavi, Rapha Gontijo Lopes, et al. Photorealistic text-to-image diffusion models with deep language understanding. arXiv preprint arXiv:2205.11487, 2022b.
         """
 
-        noise_schedule = NoiseScheduleVP(schedule='discrete', betas=betas, alphas_cumprod=alphas_cumprod)
+        noise_schedule = NoiseScheduleVP(schedule='discrete', betas=betas, alphas_cumprod=alphas_cumprod) #TODO: try cosine, linear
         model_fn = model_wrapper(
             model,
             noise_schedule,
@@ -447,11 +447,19 @@ class DPM_Solver:
         # 1) get the raw output from the wrapped model
         out = self.model(x, t)
 
-        # 2) If the model has 6 channels in "image", split them (just like you did):
-        if out["image"].shape[1] == 6:
+        # 2) If the model has 6 or 8 channels in "image", split accordingly
+        num_channels = out["image"].shape[1]
+
+        if num_channels == 6:
+            # Split into 3 + 3
             noise_pred, sigma_pred = torch.split(out["image"], 3, dim=1)
             out["image"] = noise_pred  # shape [B,3,H,W]
             out["image_sigma"] = sigma_pred  # shape [B,3,H,W]
+        elif num_channels == 8:
+            # Split into 4 + 4
+            noise_pred, sigma_pred = torch.split(out["image"], 4, dim=1)
+            out["image"] = noise_pred  # shape [B,4,H,W]
+            out["image_sigma"] = sigma_pred  # shape [B,4,H,W]
 
         # 3) Do the same for tabular if it has 2× the features
         input_tab_feats = x["tabular"].shape[1]

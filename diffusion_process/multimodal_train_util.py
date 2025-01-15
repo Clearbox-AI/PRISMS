@@ -18,6 +18,7 @@ from diffusion_process.multimodal_dpm_solver_plus import DPM_Solver
 from diffusion_process.evaluation_metrics import (compute_mmd_tabular, compute_fid, compute_mmd)
 from diffusion_process.metrics_utilities import plot_metrics
 import time
+from diffusers.models import AutoencoderKL
 
 INITIAL_LOG_LOSS_SCALE = 20.0
 
@@ -248,7 +249,7 @@ class TrainLoop:
 
                 if self.step % self.save_interval == 0:
                     # TODO REMOVED SAVING
-                    self.save()
+                    # self.save()
                     ...
                     # Run for a finite amount of time in integration tests.
 
@@ -266,7 +267,8 @@ class TrainLoop:
             # evaluation step
             if (epoch + 1) % self.eval_interval == 0:
                 # debug_memory("Before evaluate_model:")
-                self.evaluate_model(epoch)
+                # TODO: to fix with 4 channels
+                # self.evaluate_model(epoch)
                 # debug_memory("After evaluate_model:")
                 logger.dumpkvs()
 
@@ -471,7 +473,6 @@ class TrainLoop:
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
 
 
-
     def save_samples(self):
 
         def get_rank_safe():
@@ -512,9 +513,9 @@ class TrainLoop:
                 )
                 model_kwargs["y"] = classes
 
-            if self.sample_fn == 'dpm_solver':
+            if self.sample_fn == 'dpm_solver': # the dpm++ one with predict_x0=True, thresholding=False
                 dpm_solver = DPM_Solver(
-                    model=self.model,  # Using the original model here as in the original code
+                    model=self.model,
                     alphas_cumprod=th.tensor(self.diffusion.alphas_cumprod, device=dist_util.dev())
                 )
                 x_T = {
@@ -545,8 +546,28 @@ class TrainLoop:
             sample_image = sample['image']
             sample_tabular = sample['tabular']
 
+            device = th.device("cuda" if th.cuda.is_available() else "cpu")
+            autoencoder = AutoencoderKL.from_pretrained("/home/PRISMS/model_garden/microsoft_mri_autoencoder_01/weights").to(device)
+            autoencoder.eval()
+
+
+            with th.no_grad():
+                decoded = autoencoder.decode(sample_image.to(device)).sample
+
+            decoded_np = decoded.detach().cpu().numpy()
+
+            import matplotlib.pyplot as plt
+            plt.imshow(decoded_np[0,0], cmap="gray")
+
+
+
+            # TODO: TRY
             # Convert from [-1, 1] to [0, 255]
-            sample_image = ((sample_image + 1) * 127.5).clamp(0, 255).to(th.uint8)
+            # sample_image = ((sample_image + 1) * 127.5).clamp(0, 255).to(th.uint8)
+            # Normalize to [0, 1]
+            sample_image = (sample_image - sample_image.min()) / (sample_image.max() - sample_image.min()) * 255
+            sample_image = sample_image.to(th.uint8)
+
 
             # If in distributed mode, gather samples from all ranks
             if world_size > 1:
@@ -588,6 +609,124 @@ class TrainLoop:
 
         if world_size > 1:
             dist.barrier()
+
+
+    # def save_samples(self):
+    #
+    #     def get_rank_safe():
+    #         return dist.get_rank() if dist.is_initialized() else 0
+    #
+    #     def get_world_size_safe():
+    #         return dist.get_world_size() if dist.is_initialized() else 1
+    #
+    #     rank = get_rank_safe()
+    #     world_size = get_world_size_safe()
+    #
+    #     all_images = []
+    #     all_tabular = []
+    #     logger.log("create samples...")
+    #
+    #     # Create a copy of the model for sampling
+    #     sample_model = copy.deepcopy(self.model)
+    #     sample_model.to(dist_util.dev())  # Move the model copy to the appropriate device
+    #
+    #     # Use EMA parameters for sampling if available
+    #     if len(self.ema_params) > 0:
+    #         state_dict = self.mp_trainer.master_params_to_state_dict(self.ema_params[0])
+    #         sample_model.load_state_dict(state_dict)
+    #
+    #     # Set the sample model to evaluation mode
+    #     sample_model.eval()
+    #
+    #     # Safely get image and tabular sizes, supporting both DDP and single-GPU
+    #     image_size, tabular_size = get_model_sizes(self.model)
+    #
+    #     total_samples = 0
+    #     while total_samples < self.save_row ** 2:
+    #         model_kwargs = {}
+    #
+    #         if self.class_cond:
+    #             classes = th.randint(
+    #                 low=0, high=self.num_classes, size=(self.batch_size,), device=dist_util.dev()
+    #             )
+    #             model_kwargs["y"] = classes
+    #
+    #         if self.sample_fn == 'dpm_solver':
+    #             dpm_solver = DPM_Solver(
+    #                 model=self.model,  # Using the original model here as in the original code
+    #                 alphas_cumprod=th.tensor(self.diffusion.alphas_cumprod, device=dist_util.dev())
+    #             )
+    #             x_T = {
+    #                 "image": th.randn([self.batch_size, *image_size], device=dist_util.dev()),
+    #                 "tabular": th.randn([self.batch_size, tabular_size], device=dist_util.dev())
+    #             }
+    #             sample = dpm_solver.sample(
+    #                 x_T,
+    #                 steps=20,
+    #                 order=2,
+    #                 skip_type="logSNR",
+    #                 method="adaptive",
+    #             )
+    #         else:
+    #             sample_fn = (
+    #                 self.diffusion.p_sample_loop if self.sample_fn != 'ddim' else self.diffusion.ddim_sample_loop
+    #             )
+    #             sample = sample_fn(
+    #                 model=self.model,  # Using the original model as in the original code
+    #                 shape={
+    #                     "image": [self.batch_size, *image_size],
+    #                     "tabular": [self.batch_size, tabular_size]
+    #                 },
+    #                 clip_denoised=True,
+    #                 model_kwargs=model_kwargs,
+    #             )
+    #
+    #         sample_image = sample['image']
+    #         sample_tabular = sample['tabular']
+    #
+    #         # Convert from [-1, 1] to [0, 255]
+    #         sample_image = ((sample_image + 1) * 127.5).clamp(0, 255).to(th.uint8)
+    #
+    #         # If in distributed mode, gather samples from all ranks
+    #         if world_size > 1:
+    #             gathered_sample_images = [th.zeros_like(sample_image) for _ in range(world_size)]
+    #             dist.all_gather(gathered_sample_images, sample_image)
+    #         else:
+    #             gathered_sample_images = [sample_image]
+    #
+    #         all_images.extend([img_tensor.cpu().numpy() for img_tensor in gathered_sample_images])
+    #
+    #         if world_size > 1:
+    #             gathered_sample_tabular = [th.zeros_like(sample_tabular) for _ in range(world_size)]
+    #             dist.all_gather(gathered_sample_tabular, sample_tabular)
+    #         else:
+    #             gathered_sample_tabular = [sample_tabular]
+    #
+    #         all_tabular.extend([tab_tensor.cpu().numpy() for tab_tensor in gathered_sample_tabular])
+    #
+    #         total_samples += self.batch_size * world_size
+    #
+    #         if rank == 0:
+    #             logger.log(f"{total_samples} samples generated.")
+    #
+    #     all_images = np.concatenate(all_images, axis=0)
+    #     all_tabular = np.concatenate(all_tabular, axis=0)
+    #
+    #     if rank == 0:
+    #         timestamp = time.strftime('%Y%m%d_%H%M%S')
+    #         # Create new folder to save samples
+    #         samples_dir = os.path.join(logger.get_dir(), f'samples_{timestamp}')
+    #         os.makedirs(samples_dir, exist_ok=True)
+    #         # Save images
+    #         for idx, img_array in enumerate(all_images):
+    #             img = Image.fromarray(img_array.transpose(1, 2, 0))
+    #             img.save(os.path.join(samples_dir, f"sample_image_{idx}.png"))
+    #
+    #         # Save tabular data
+    #         np.save(os.path.join(samples_dir, f"sample_tabular.npy"), all_tabular)
+    #
+    #     if world_size > 1:
+    #         dist.barrier()
 
 
 

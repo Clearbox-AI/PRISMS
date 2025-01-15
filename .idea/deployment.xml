@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="giovanni@35.242.219.34:22 key (3)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" showNewOnTargetInSync="false">
+  <component name="PublishConfigData" autoUpload="Always" serverName="giovanni@35.242.219.34:22 key (9)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" showNewOnTargetInSync="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
       <paths name="giovanni@35.242.219.34:22 key">
@@ -18,6 +18,48 @@
         </serverdata>
       </paths>
       <paths name="giovanni@35.242.219.34:22 key (3)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.242.219.34:22 key (4)">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.242.219.34:22 key (5)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.242.219.34:22 key (6)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.242.219.34:22 key (7)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.242.219.34:22 key (8)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.242.219.34:22 key (9)">
         <serverdata>
           <mappings>
             <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" />

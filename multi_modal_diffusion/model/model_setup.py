@@ -123,7 +123,7 @@ def create_model(
         image_size=image_size,
         tabular_size=tabular_size,
         model_channels=num_channels,
-        image_out_channels=(3 if not learn_sigma else 6),
+        image_out_channels=(4 if not learn_sigma else 8), #(3 if not learn_sigma else 6),
         tabular_out_channels=(tabular_size if not learn_sigma else tabular_size * 2),
         num_res_blocks=num_res_blocks,
         cross_attention_resolutions=cross_attention_resolutions,
