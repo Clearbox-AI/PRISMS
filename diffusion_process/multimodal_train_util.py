@@ -547,14 +547,14 @@ class TrainLoop:
             sample_tabular = sample['tabular']
 
             # CODE TO DECODE
-            device = th.device("cuda" if th.cuda.is_available() else "cpu")
-            autoencoder = AutoencoderKL.from_pretrained("/home/PRISMS/model_garden/microsoft_mri_autoencoder_01/weights").to(device)
-            autoencoder.eval()
-            with th.no_grad():
-                decoded = autoencoder.decode(sample_image.to(device)).sample
-            decoded_np = decoded.detach().cpu().numpy()
-            import matplotlib.pyplot as plt
-            plt.imshow(decoded_np[0,0], cmap="gray")
+            # device = th.device("cuda" if th.cuda.is_available() else "cpu")
+            # autoencoder = AutoencoderKL.from_pretrained("/home/PRISMS/model_garden/microsoft_mri_autoencoder_01/weights").to(device)
+            # autoencoder.eval()
+            # with th.no_grad():
+            #     decoded = autoencoder.decode(sample_image.to(device)).sample
+            # decoded_np = decoded.detach().cpu().numpy()
+            # import matplotlib.pyplot as plt
+            # plt.imshow(decoded_np[0,0], cmap="gray")
 
 
 
