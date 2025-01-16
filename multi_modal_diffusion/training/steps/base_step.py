@@ -69,7 +69,7 @@ class BaseTrainingStep(TrainingStep):
             class_cond=args.class_cond,
             sample_fn=args.sample_fn,
             eval_interval=1,
-            num_eval_samples=20,
+            num_eval_samples=20
         ).run_loop()
 
         return self.model, self.diffusion

@@ -39,6 +39,7 @@ def create_model_and_diffusion(
         tabular_type="1d",
         class_cond=False,
         freeze_mod=None,
+        debug=False,
         **kwargs
 ):
     model = create_model(
@@ -60,7 +61,8 @@ def create_model_and_diffusion(
         dropout=dropout,
         resblock_updown=resblock_updown,
         use_fp16=use_fp16,
-        freeze_mod=freeze_mod
+        freeze_mod=freeze_mod,
+        debug=debug,
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -94,7 +96,8 @@ def create_model(
         dropout=0,
         use_fp16=False,
         resblock_updown=True,
-        freeze_mod=None
+        freeze_mod=None,
+        debug=False,
 ):
     # Parse sizes
     image_size = tuple(int(x) for x in image_size.split(','))
@@ -138,7 +141,8 @@ def create_model(
         num_head_channels=num_head_channels,
         num_heads_upsample=num_heads_upsample,
         use_scale_shift_norm=use_scale_shift_norm,
-        resblock_updown=resblock_updown
+        resblock_updown=resblock_updown,
+        debug=debug
     )
 
     if freeze_mod:

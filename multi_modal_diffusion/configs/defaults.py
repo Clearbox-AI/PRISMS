@@ -1,5 +1,13 @@
 import argparse
 from diffusion_process.enums import DatasetType
+from multi_modal_diffusion.custom_logger import DebugLogger
+
+output_dir = "/mnt/storage/nacc_sub/tmp"
+single_attn_active = True
+cross_attn_active = True
+
+# INITIALIZE CUSTOM DEBUG
+debug_logger = DebugLogger(base_dir=output_dir)
 
 def get_default_config():
     """
@@ -30,7 +38,7 @@ def get_default_config():
             log_interval=10,
             devices=None,
             save_interval=300,
-            output_dir="/mnt/storage/nacc_sub/tmp",
+            output_dir=output_dir,
             resume_checkpoint="",
             use_fp16=False,
             fp16_scale_growth=1e-3,
@@ -70,6 +78,7 @@ def get_default_config():
             image_type="2d",
             tabular_type="1d",
             freeze_mod=None,
+            debug=True
         )
     )
 

@@ -10,6 +10,9 @@ from multi_modal_diffusion.arch_utils import (conv_nd, avg_pool_nd, normalizatio
                         timestep_embedding)
 from multi_modal_diffusion.fp16_util import (convert_module_to_f16, convert_module_to_f32)
 from multi_modal_diffusion import logger
+from multi_modal_diffusion.custom_logger import (register_gradient_hooks, debug_print_stats, debug_forward)
+from multi_modal_diffusion.configs.defaults import (debug_logger, single_attn_active, cross_attn_active)
+
 
 
 from torch import Tensor
@@ -59,12 +62,30 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
+    def __init__(self, *args, debug=False):
+        super().__init__(*args)
+        self.debug = debug
+        if self.debug:
+            # Optionally register gradient hooks for your entire sequential
+            register_gradient_hooks(self, name_prefix="TimestepEmbedSequential", debug_logger=debug_logger)
+
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, image, tabular, emb):
-        for layer in self:
+        if self.debug:
+            debug_print_stats(image, "TimestepEmbedSequential - input image", debug_logger=debug_logger)
+            debug_print_stats(tabular, "TimestepEmbedSequential - input tabular", debug_logger=debug_logger)
+            debug_print_stats(emb, "TimestepEmbedSequential - time emb", debug_logger=debug_logger)
+
+        for idx, layer in enumerate(self):
             if isinstance(layer, TimestepBlock):
                 image, tabular = layer(image, tabular, emb)
             else:
                 image, tabular = layer(image, tabular)
+
+            if self.debug:
+                debug_print_stats(image, f"TimestepEmbedSequential - layer {idx} output image", debug_logger=debug_logger)
+                debug_print_stats(tabular, f"TimestepEmbedSequential - layer {idx} output tabular", debug_logger=debug_logger)
+
         return image, tabular
 
 class ImageConv(nn.Module):
@@ -76,8 +97,10 @@ class ImageConv(nn.Module):
             stride=1,
             padding="same",
             dilation=1,
+            debug=False
     ):
         super().__init__()
+        self.debug = debug
 
         self.image_conv = conv_nd(
             2,  # Dimension for image data
@@ -89,8 +112,19 @@ class ImageConv(nn.Module):
             dilation=dilation
         )
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="ImageConv", debug_logger=debug_logger)
+
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, image):
-        return self.image_conv(image)
+        if self.debug:
+            debug_print_stats(image, "ImageConv - input", debug_logger=debug_logger)
+
+        out = self.image_conv(image)
+
+        if self.debug:
+            debug_print_stats(out, "ImageConv - output", debug_logger=debug_logger)
+        return out
 
 class TabularMLP(nn.Module):
     """
@@ -103,8 +137,11 @@ class TabularMLP(nn.Module):
             hidden_features=None,
             num_layers=2,
             activation=nn.SiLU(),
+            debug=False
     ):
         super().__init__()
+        self.debug = debug
+
         layers = []
         hidden_features = hidden_features or max(in_features, out_features)
         for i in range(num_layers - 1):
@@ -113,8 +150,19 @@ class TabularMLP(nn.Module):
         layers.append(nn.Linear(hidden_features, out_features))
         self.mlp = nn.Sequential(*layers)
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="TabularMLP", debug_logger=debug_logger)
+
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, x):
-        return self.mlp(x)
+        if self.debug:
+            debug_print_stats(x, "TabularMLP - input", debug_logger=debug_logger)
+
+        out = self.mlp(x)
+
+        if self.debug:
+            debug_print_stats(out, "TabularMLP - output", debug_logger=debug_logger)
+        return out
 
 class InitialBlock(nn.Module):
     def __init__(
@@ -123,22 +171,37 @@ class InitialBlock(nn.Module):
             tabular_in_features,
             image_out_channels,
             tabular_out_features,
-            kernel_size=3
+            kernel_size=3,
+            debug=False
     ):
         super().__init__()
+        self.debug = debug
 
         # Image processing layer: 2D convolution for images
-        self.image_conv = ImageConv(image_in_channels, image_out_channels, kernel_size=kernel_size)
+        self.image_conv = ImageConv(image_in_channels, image_out_channels, kernel_size=kernel_size, debug=self.debug)
 
         # Tabular data processing layer: MLP
-        self.tabular_mlp = TabularMLP(tabular_in_features, tabular_out_features)
+        self.tabular_mlp = TabularMLP(tabular_in_features, tabular_out_features, debug=self.debug)
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="InitialBlock", debug_logger=debug_logger)
+
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, image, tabular):
+
+        if self.debug:
+            debug_print_stats(image, "InitialBlock - input image", debug_logger=debug_logger)
+            debug_print_stats(tabular, "InitialBlock - input tabular", debug_logger=debug_logger)
+
         # Process image data
         image_out = self.image_conv(image)
 
         # Process tabular data
         tabular_out = self.tabular_mlp(tabular)
+
+        if self.debug:
+            debug_print_stats(image_out, "InitialBlock - output image", debug_logger=debug_logger)
+            debug_print_stats(tabular_out, "InitialBlock - output tabular", debug_logger=debug_logger)
 
         return image_out, tabular_out
 
@@ -150,24 +213,34 @@ class Upsample(nn.Module):
     Note: For tabular data, upsampling is not typically applicable.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, debug=False):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
         self.stride = 2
+        self.debug = debug
 
         # Define convolution based on dimensions if needed
-        if use_conv:
-            if dims == 2:  # For images
-                self.conv = conv_nd(2, self.channels, self.out_channels, kernel_size=3)
+        if use_conv and dims == 2:  # For images
+            self.conv = conv_nd(2, self.channels, self.out_channels, kernel_size=3)
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="Upsample", debug_logger=debug_logger)
+
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, x):
+        if self.debug:
+            debug_print_stats(x, "Upsample - input", debug_logger=debug_logger)
+
         if self.dims == 2:
             x = F.interpolate(x, scale_factor=(self.stride, self.stride), mode="nearest")
             if self.use_conv:
                 x = self.conv(x)
+
+        if self.debug:
+            debug_print_stats(x, "Upsample - output", debug_logger=debug_logger)
         return x
 
 class Downsample(nn.Module):
@@ -177,12 +250,13 @@ class Downsample(nn.Module):
     we can use identity or appropriate MLP layers if necessary.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, debug=False):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
+        self.debug = debug
 
         if dims == 2:
             # Image downsampling
@@ -194,11 +268,21 @@ class Downsample(nn.Module):
             # For tabular data, we can use an identity layer
             self.op = nn.Identity()
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="Downsample", debug_logger=debug_logger)
+
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, x):
+        if self.debug:
+            debug_print_stats(x, "Downsample - input", debug_logger=debug_logger)
+
         if self.dims == 2:
             x = self.op(x)
         else:
             x = self.op(x)
+
+        if self.debug:
+            debug_print_stats(x, "Downsample - output", debug_logger=debug_logger)
         return x
 
 
@@ -207,27 +291,61 @@ class SingleModalQKVAttention(nn.Module):
     A module which performs QKV attention.
     """
 
-    def __init__(self, n_heads):
+    def __init__(self, n_heads, debug=False):
         super().__init__()
         self.n_heads = n_heads
+        self.debug = debug
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="SingleModalQKVAttention", debug_logger=debug_logger)
+
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, qkv):
+        """
+        qkv: [batch, width, length]
+        where width = n_heads * channels * 3  (since Q, K, V are concatenated)
+        """
+
+        if self.debug:
+            debug_print_stats(qkv, "SingleModalQKVAttention - qkv (input)", debug_logger=debug_logger)
+
         bs, width, length = qkv.shape
-        assert width % (3 * self.n_heads) == 0
+        assert width % (3 * self.n_heads) == 0, f"width={width} is not divisible by 3*n_heads={3*self.n_heads}"
         ch = width // (3 * self.n_heads)
 
+        # Separate Q, K, V
         q, k, v = qkv.chunk(3, dim=1)
+
+        if self.debug:
+            debug_print_stats(q, "Q shape", debug_logger=debug_logger)
+            debug_print_stats(k, "K shape", debug_logger=debug_logger)
+            debug_print_stats(v, "V shape", debug_logger=debug_logger)
+
         scale = 1 / math.sqrt(math.sqrt(ch))
 
+        # Compute attention weight
         weight = th.einsum(
             "bct,bcs->bts",
             (q * scale).view(bs * self.n_heads, ch, length),
             (k * scale).view(bs * self.n_heads, ch, length),
         )
+
+        if self.debug:
+            debug_print_stats(weight, "attention weight (before softmax)", debug_logger=debug_logger)
+
         weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
+
+        if self.debug:
+            debug_print_stats(weight, "attention weight (after softmax)", debug_logger=debug_logger)
+
+        # Multiply by V
         a = th.einsum("bts,bcs->bct", weight, v.reshape(bs * self.n_heads, ch, length))
 
-        return a.reshape(bs, -1, length)
+        out = a.reshape(bs, -1, length)
+        if self.debug:
+            debug_print_stats(out, "SingleModalQKVAttention - output", debug_logger=debug_logger)
+
+        return out
 
     @staticmethod
     def count_flops(model, _x, y):
@@ -236,21 +354,14 @@ class SingleModalQKVAttention(nn.Module):
 class SingleModalAtten(nn.Module):
     """
     An attention block that allows positions to attend to each other.
-
     Adapted for image data (spatial attention) and tabular data (feature-wise attention).
     """
 
-    def __init__(
-        self,
-        channels,
-        num_heads=1,
-        num_head_channels=-1,
-        use_checkpoint=False,
-        is_tabular=False,
-    ):
+    def __init__(self, channels, num_heads=1, num_head_channels=-1, use_checkpoint=False, is_tabular=False, debug=False):
         super().__init__()
         self.channels = channels
         self.is_tabular = is_tabular
+        self.debug = debug
 
         # Set the number of attention heads
         if num_head_channels == -1:
@@ -269,58 +380,131 @@ class SingleModalAtten(nn.Module):
             # For tabular data, attention over features
             self.qkv = nn.Linear(channels, channels * 3)
             self.attention = nn.MultiheadAttention(embed_dim=channels, num_heads=self.num_heads)
-            # self.proj_out = zero_module(nn.Linear(channels, channels))
             self.proj_out = nn.Linear(channels, channels)
         else:
             # For image data, attention over spatial dimensions
             self.qkv = conv_nd(1, channels, channels * 3, kernel_size=1)
-            self.attention = SingleModalQKVAttention(self.num_heads)
+            self.attention = SingleModalQKVAttention(self.num_heads, debug=self.debug)
             self.proj_out = zero_module(conv_nd(1, channels, channels, kernel_size=1))
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="SingleModalAtten", debug_logger=debug_logger)
+
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, x):
+        """
+        x is either:
+        - [batch, channels, seq_len] (if is_tabular=False, 'image' flattened)
+        - [batch, channels] (if is_tabular=True)
+        """
+
+        if self.debug:
+            debug_print_stats(x, "SingleModalAtten - input (raw)", debug_logger=debug_logger)
+            if self.is_tabular:
+                assert x.ndim == 2, f"Expected [B, C] for tabular, got {x.shape}"
+            else:
+                assert x.ndim == 3, f"Expected [B, C, seq_len] for image, got {x.shape}"
+
+        # We use checkpoint if needed
         return checkpoint(self._forward, (x,), self.parameters(), self.use_checkpoint)
 
+    @debug_forward(debug_logger=debug_logger)
     def _forward(self, x):
+        x_norm = self.norm(x)
+
+        if self.debug:
+            debug_print_stats(x_norm, "SingleModalAtten - after norm", debug_logger=debug_logger)
+
         if self.is_tabular:
             # TODO: check methodology
-            x = self.norm(x)
+
+            # x_norm: [batch, channels], qkv: [batch, channels*3]
+
             qkv = self.qkv(x)  # [batch, features * 3]
-            qkv = qkv.view(x.shape[0], 3, self.channels)  # [batch, 3, channels]
-            q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+            if self.debug:
+                debug_print_stats(qkv, "SingleModalAtten (tabular) - qkv (raw)", debug_logger=debug_logger)
+
+            # Reshape to [batch, 3, channels]
+            b, _ = qkv.shape
+            qkv = qkv.view(b, 3, self.channels)
+            if self.debug:
+                debug_print_stats(qkv, "SingleModalAtten (tabular) - qkv (reshaped)", debug_logger=debug_logger)
+
+            # Split
+            q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]  # each [batch, channels]
+            # Add sequence dim = 1
             q, k, v = q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1)  # [batch, 1, channels]
-            h, _ = self.attention(q, k, v)  # [batch, 1, channels]
-            h = h.squeeze(1)  # [batch, channels]
+
+            # we need to transpose to match [1, batch, channels]: for official signature for nn.MultiheadAttention is (query, key, value) with shape [seq_len, batch, embed_dim]
+            q_t = q.permute(1, 0, 2)  # [1, batch, channels]
+            k_t = k.permute(1, 0, 2)
+            v_t = v.permute(1, 0, 2)
+
+            h, _ = self.attention(q_t, k_t, v_t)  # [1, batch, channels]
+            if self.debug:
+                debug_print_stats(h, "SingleModalAtten (tabular) - attention output", debug_logger=debug_logger)
+
+            h = h.permute(1, 0, 2).squeeze(1)  # [batch, channels]
             h = self.proj_out(h)
+            if self.debug:
+                debug_print_stats(h, "SingleModalAtten (tabular) - proj_out", debug_logger=debug_logger)
+
+            # Skip connection
+            assert h.shape == x.shape, \
+                f"Skip connection shape mismatch: x={x.shape}, h={h.shape}"
             return x + h
+
         else:
-            # x: [batch, channels, sequence_length]
-            b, c, length = x.shape
-            x = self.norm(x)
-            qkv = self.qkv(x)
+            # x_norm: [batch, channels, seq_len], qkv conv: [batch, channels*3, seq_len]
+            qkv = self.qkv(x_norm)
+            if self.debug:
+                debug_print_stats(qkv, "SingleModalAtten (image) - qkv (raw)", debug_logger=debug_logger)
+
+            # SingleModalQKVAttention expects [batch, width, length] where width = 3 * num_heads * ch_for_head
             h = self.attention(qkv)
+            if self.debug:
+                debug_print_stats(h, "SingleModalAtten (image) - attn output", debug_logger=debug_logger)
+
+            # final projection
             h = self.proj_out(h)
+            if self.debug:
+                debug_print_stats(h, "SingleModalAtten (image) - proj_out", debug_logger=debug_logger)
+
+            # Skip connection
+            assert h.shape == x.shape, \
+                f"Skip connection shape mismatch: x={x.shape}, h={h.shape}"
             return x + h
+
+        # OLD
+        # if self.is_tabular:
+        #     # TODO: check methodology
+        #     x = self.norm(x)
+        #     qkv = self.qkv(x)  # [batch, features * 3]
+        #     qkv = qkv.view(x.shape[0], 3, self.channels)  # [batch, 3, channels]
+        #     q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+        #     q, k, v = q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1)  # [batch, 1, channels]
+        #     h, _ = self.attention(q, k, v)  # [batch, 1, channels]
+        #     h = h.squeeze(1)  # [batch, channels]
+        #     h = self.proj_out(h)
+        #     return x + h
+        # else:
+        #     # x: [batch, channels, sequence_length]
+        #     b, c, length = x.shape
+        #     x = self.norm(x)
+        #     qkv = self.qkv(x)
+        #     h = self.attention(qkv)
+        #     h = self.proj_out(h)
+        #     return x + h
 
 class ResBlock(TimestepBlock):
     """
     A residual block adapted for image and tabular data that can optionally change the number of channels.
     """
 
-    def __init__(
-        self,
-        channels,
-        emb_channels,
-        dropout,
-        out_channels=None,
-        use_scale_shift_norm=False,
-        use_checkpoint=False,
-        up=False,
-        down=False,
-        use_conv=False,
-        image_attention=False,
-        tabular_attention=False,
-        num_heads=4,
-    ):
+    def __init__(self, channels, emb_channels, dropout, out_channels=None, use_scale_shift_norm=False,
+                 use_checkpoint=False, up=False, down=False, use_conv=False, image_attention=False,
+                 tabular_attention=False, num_heads=4, debug=False, attention_active=None):
+
         super().__init__()
         self.channels = channels
         self.emb_channels = emb_channels
@@ -328,32 +512,37 @@ class ResBlock(TimestepBlock):
         self.out_channels = out_channels or channels
         self.use_checkpoint = use_checkpoint
         self.use_scale_shift_norm = use_scale_shift_norm
+        self.debug = debug
+        self.attention_active = single_attn_active if not attention_active else attention_active
+
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="ResBlock", debug_logger=debug_logger)
 
         # Image processing layers
         self.image_in_layers = nn.Sequential(
             normalization(channels),
             nn.SiLU(),
-            ImageConv(channels, self.out_channels, kernel_size=3)
+            ImageConv(channels, self.out_channels, kernel_size=3, debug=self.debug)
         )
 
         # Tabular processing layers
         self.tabular_in_layers = nn.Sequential(
             normalization(channels),
             nn.SiLU(),
-            TabularMLP(channels, self.out_channels)
+            TabularMLP(channels, self.out_channels, debug=self.debug)
         )
 
         # Upsampling and Downsampling
         self.updown = up or down
         if up:
-            self.img_upd = Upsample(channels, use_conv, dims=2)
-            self.img_upd_orig = Upsample(channels, use_conv, dims=2)  # For the original image input
+            self.img_upd = Upsample(channels, use_conv, dims=2, debug=self.debug)
+            self.img_upd_orig = Upsample(channels, use_conv, dims=2, debug=self.debug)  # For the original image input
             # For tabular data, upsampling is not applicable
             self.tab_upd = nn.Identity()
             self.tab_upd_orig = nn.Identity()
         elif down:
-            self.img_upd = Downsample(channels, use_conv, dims=2)
-            self.img_upd_orig = Downsample(channels, use_conv, dims=2)  # For the original image input
+            self.img_upd = Downsample(channels, use_conv, dims=2, debug=self.debug)
+            self.img_upd_orig = Downsample(channels, use_conv, dims=2, debug=self.debug)  # For the original image input
             # For tabular data, downsampling is not applicable
             self.tab_upd = nn.Identity()
             self.tab_upd_orig = nn.Identity()
@@ -365,20 +554,21 @@ class ResBlock(TimestepBlock):
             nn.SiLU(),
             nn.Linear(emb_channels, 2 * self.out_channels if use_scale_shift_norm else self.out_channels)
         )
+        if self.debug:
+            register_gradient_hooks(self.emb_layers, name_prefix="ResBlock.emb_layers", debug_logger=debug_logger)
 
         # Output layers for image and tabular data
         self.image_out_layers = nn.Sequential(
             normalization(self.out_channels),
             nn.SiLU(),
             nn.Dropout(p=dropout),
-            zero_module(ImageConv(self.out_channels, self.out_channels, kernel_size=1))
+            zero_module(ImageConv(self.out_channels, self.out_channels, kernel_size=1, debug=self.debug))
         )
 
         self.tabular_out_layers = nn.Sequential(
             normalization(self.out_channels),
             nn.SiLU(),
             nn.Dropout(p=dropout),
-            # zero_module(nn.Linear(self.out_channels, self.out_channels))
             nn.Linear(self.out_channels, self.out_channels)
         )
 
@@ -387,10 +577,10 @@ class ResBlock(TimestepBlock):
             self.image_skip_connection = nn.Identity()
             self.tabular_skip_connection = nn.Identity()
         elif use_conv:
-            self.image_skip_connection = ImageConv(channels, self.out_channels, kernel_size=3)
+            self.image_skip_connection = ImageConv(channels, self.out_channels, kernel_size=3, debug=self.debug)
             self.tabular_skip_connection = nn.Linear(channels, self.out_channels)
         else:
-            self.image_skip_connection = ImageConv(channels, self.out_channels, kernel_size=1)
+            self.image_skip_connection = ImageConv(channels, self.out_channels, kernel_size=1, debug=self.debug)
             self.tabular_skip_connection = nn.Linear(channels, self.out_channels)
 
         # Attention blocks (optional)
@@ -400,52 +590,75 @@ class ResBlock(TimestepBlock):
         if self.image_attention:
             self.image_attention_block = SingleModalAtten(
                 channels=self.out_channels, num_heads=num_heads, num_head_channels=-1,
-                use_checkpoint=use_checkpoint, is_tabular=False
+                use_checkpoint=use_checkpoint, is_tabular=False, debug=self.debug
             )
         if self.tabular_attention:
             self.tabular_attention_block = SingleModalAtten(
                 channels=self.out_channels, num_heads=num_heads, num_head_channels=-1,
-                use_checkpoint=use_checkpoint, is_tabular=True
+                use_checkpoint=use_checkpoint, is_tabular=True, debug=self.debug
             )
 
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, image, tabular, emb):
         """
         Apply the block to image and tabular data, conditioned on a timestep embedding.
+        Applies gradient checkpointing around self._forward
         """
+
+        if self.debug:
+            debug_print_stats(image, "ResBlock - forward (image) [before checkpoint]", debug_logger=debug_logger)
+            debug_print_stats(tabular, "ResBlock - forward (tabular) [before checkpoint]", debug_logger=debug_logger)
+
         return checkpoint(self._forward, (image, tabular, emb), self.parameters(), self.use_checkpoint)
 
+    @debug_forward(debug_logger=debug_logger)
     def _forward(self, image, tabular, emb):
         """
-        Image shape: [batch, channels, height, width]
-        Tabular shape: [batch, features]
+        :param image:  [batch, channels, height, width]
+        :param tabular:  [batch, features]
+        :param emb: time-step embedding [batch, emb_channels]
         """
+
+        if self.debug:
+            debug_print_stats(image, "ResBlock - _forward (image in)", debug_logger=debug_logger)
+            debug_print_stats(tabular, "ResBlock - _forward (tabular in)", debug_logger=debug_logger)
+            debug_print_stats(emb, "ResBlock - _forward (emb in)", debug_logger=debug_logger)
+
         b, c, h, w = image.shape  # For image
 
+        # 1. Up/Down sampling flow
         if self.updown:
             # Processed features
             img_h = self.image_in_layers(image)
             img_h = self.img_upd(img_h)
 
             tab_h = self.tabular_in_layers(tabular)
-            # No upsampling for tabular data
-            tab_h = self.tab_upd(tab_h)
+            tab_h = self.tab_upd(tab_h) # No upsampling for tabular data
 
-            # Original inputs transformed to match processed features
+            # Also transform original inputs so skip-connection matches
             image = self.img_upd_orig(image)
-            # No upsampling for tabular data
-            tabular = self.tab_upd_orig(tabular)
+            tabular = self.tab_upd_orig(tabular) # No upsampling for tabular data
         else:
             img_h = self.image_in_layers(image)
             tab_h = self.tabular_in_layers(tabular)
 
-        # Process timestep embedding
-        emb_out = self.emb_layers(emb).type(image.dtype)
+        if self.debug:
+            debug_print_stats(img_h, "ResBlock - img_h (after in_layers & up/down)", debug_logger=debug_logger)
+            debug_print_stats(tab_h, "ResBlock - tab_h (after in_layers & up/down)", debug_logger=debug_logger)
 
+        # 2. Timestep embedding
+        emb_out = self.emb_layers(emb).type(image.dtype)
+        if self.debug:
+            debug_print_stats(emb_out, "ResBlock - emb_out (after emb_layers)", debug_logger=debug_logger)
+
+        # 3. Scale-Shift Norm or direct add
         if self.use_scale_shift_norm:
             # Scale and shift for images
             img_out_norm, img_out_rest = self.image_out_layers[0], self.image_out_layers[1:]
             img_emb_out = emb_out[:, :, None, None]  # Reshape to broadcast across height and width
             scale, shift = th.chunk(img_emb_out, 2, dim=1)
+
+            # Normalization, then scale/shift
             img_h = img_out_norm(img_h) * (1 + scale) + shift
             img_h = img_out_rest(img_h)
 
@@ -453,6 +666,7 @@ class ResBlock(TimestepBlock):
             tab_out_norm, tab_out_rest = self.tabular_out_layers[0], self.tabular_out_layers[1:]
             tab_emb_out = emb_out
             scale, shift = th.chunk(tab_emb_out, 2, dim=1)
+
             tab_h = tab_out_norm(tab_h) * (1 + scale) + shift
             tab_h = tab_out_rest(tab_h)
         else:
@@ -465,153 +679,46 @@ class ResBlock(TimestepBlock):
             tab_h = tab_h + tab_emb_out
             tab_h = self.tabular_out_layers(tab_h)
 
-        # Add skip connections
-        image_out = self.image_skip_connection(image) + img_h
-        tabular_out = self.tabular_skip_connection(tabular) + tab_h
+        if self.debug:
+            debug_print_stats(img_h, "ResBlock - img_h (after scale-shift / out_layers)", debug_logger=debug_logger)
+            debug_print_stats(tab_h, "ResBlock - tab_h (after scale-shift / out_layers)", debug_logger=debug_logger)
 
-        # Apply attention if enabled
-        if self.image_attention:
-            image_out = rearrange(image_out, "b c h w -> b c (h w)")  # Flatten spatial dimensions
+        # 4. Skip connections
+        skip_img = self.image_skip_connection(image)
+        skip_tab = self.tabular_skip_connection(tabular)
+
+        if self.debug:
+            debug_print_stats(skip_img, "ResBlock - skip_img", debug_logger=debug_logger)
+            debug_print_stats(skip_tab, "ResBlock - skip_tab", debug_logger=debug_logger)
+
+        image_out = skip_img + img_h
+        tabular_out = skip_tab + tab_h
+
+        if self.debug:
+            debug_print_stats(image_out, "ResBlock - image_out (skip connected)", debug_logger=debug_logger)
+            debug_print_stats(tabular_out, "ResBlock - tabular_out (skip connected)", debug_logger=debug_logger)
+
+        # 5. (Optional) Single-modal attention if enabled & attention_active
+        if self.image_attention and self.attention_active:
+            # Flatten spatial dims from [B, C, H, W] -> [B, C, H*W]
+            image_out = rearrange(image_out, "b c h w -> b c (h w)")
+            if self.debug:
+                debug_print_stats(image_out, "ResBlock - image_out (flattened for attention)", debug_logger=debug_logger)
             image_out = self.image_attention_block(image_out)
-            image_out = rearrange(image_out, "b c (h w) -> b c h w", h=h, w=w)  # Reshape back
+            # Reshape back
+            image_out = rearrange(image_out, "b c (h w) -> b c h w", h=h, w=w)
+            if self.debug:
+                debug_print_stats(image_out, "ResBlock - image_out (after attention)", debug_logger=debug_logger)
 
-        if self.tabular_attention:
+        if self.tabular_attention and self.attention_active:
+            # For tabular, shape is [B, C].  Direct pass:
+            if self.debug:
+                debug_print_stats(tabular_out, "ResBlock - tabular_out (before attention)", debug_logger=debug_logger)
             tabular_out = self.tabular_attention_block(tabular_out)
+            if self.debug:
+                debug_print_stats(tabular_out, "ResBlock - tabular_out (after attention)", debug_logger=debug_logger)
 
         return image_out, tabular_out
-
-
-# class QKVAttention(nn.Module):
-#     """
-#     A module which performs QKV attention for cross-attention between image and tabular data.
-#     """
-#
-#     def __init__(self, n_heads):
-#         super().__init__()
-#         self.n_heads = n_heads
-#
-#     def forward(self, qkv, image_len, tabular_len):
-#         """
-#         Apply QKV attention over concatenated image and tabular tokens.
-#
-#         :param qkv: A tensor of Qs, Ks, and Vs concatenated, [batch_size, 3 * n_heads * channels, total_len]
-#         :param image_len: Number of tokens in the image portion.
-#         :param tabular_len: Number of tokens in the tabular portion.
-#         :return: Attention outputs for both image and tabular tokens.
-#         """
-#
-#         bs, width, total_len = qkv.shape
-#         assert width % (3 * self.n_heads) == 0, "Width must be divisible by 3 * n_heads"
-#         ch = width // (3 * self.n_heads)
-#
-#         # Reshape and split Q, K, V
-#         qkv = qkv.view(bs, self.n_heads, 3 * ch, total_len)
-#         q, k, v = qkv.split(ch, dim=2)  # Each: [batch_size, n_heads, ch, total_len]
-#         scale = 1 / math.sqrt(ch)
-#
-#         # Compute attention weights over the concatenated sequence
-#         attn_weights = th.softmax(
-#             th.einsum("bncl,bncs->bnls", q * scale, k * scale), dim=-1
-#         )  # [batch_size, n_heads, total_len, total_len]
-#
-#         # Apply attention weights to values
-#         attn_output = th.einsum("bnls,bncs->bncl", attn_weights, v)  # [batch_size, n_heads, ch, total_len]
-#
-#         # Split the output back into image and tabular parts
-#         image_output = attn_output[..., :image_len].contiguous()
-#         tabular_output = attn_output[..., image_len:].contiguous()
-#
-#         # Reshape back to original dimensions
-#         image_output = image_output.view(bs, -1, image_len)  # [batch_size, n_heads * ch, image_len]
-#         tabular_output = tabular_output.view(bs, -1, tabular_len)  # [batch_size, n_heads * ch, tabular_len]
-#
-#         return image_output, tabular_output
-#
-#
-# class CrossAttentionBlock(nn.Module):
-#     """
-#     Cross-attention block for image and tabular data.
-#     """
-#
-#     def __init__(
-#             self,
-#             channels,
-#             num_heads=1,
-#             num_head_channels=-1,
-#             use_checkpoint=False,
-#     ):
-#         super().__init__()
-#         self.channels = channels
-#
-#         # Set the number of heads
-#         if num_head_channels == -1:
-#             self.num_heads = num_heads
-#         else:
-#             assert (
-#                     channels % num_head_channels == 0
-#             ), f"channels {channels} is not divisible by num_head_channels {num_head_channels}"
-#             self.num_heads = channels // num_head_channels
-#
-#         self.use_checkpoint = use_checkpoint
-#
-#         # Normalization layers
-#         self.img_norm = normalization(self.channels)
-#         self.tab_norm = normalization(self.channels)
-#
-#         # QKV computation for image and tabular data
-#         self.img_qkv = nn.Linear(self.channels, self.channels * 3)
-#         self.tab_qkv = nn.Linear(self.channels, self.channels * 3)
-#
-#         # Attention
-#         self.attention = QKVAttention(self.num_heads)
-#
-#         # Projection layers
-#         self.img_proj_out = zero_module(nn.Linear(self.channels, self.channels))
-#         self.tab_proj_out = zero_module(nn.Linear(self.channels, self.channels))
-#
-#     def forward(self, image, tabular):
-#         return checkpoint(self._forward, (image, tabular), self.parameters(), self.use_checkpoint)
-#
-#     def _forward(self, image, tabular):
-#         """
-#         Forward method for cross-attention between image and tabular data.
-#
-#         :param image: Image tensor of shape [batch_size, channels, height, width]
-#         :param tabular: Tabular tensor of shape [batch_size, channels]
-#         :return: Updated image and tabular data with cross-attention applied.
-#         """
-#         b, c, h, w = image.shape  # Image dimensions
-#         b_t, f = tabular.shape  # Tabular dimensions (features)
-#
-#         # Flatten spatial dimensions for image tokens
-#         image_token = rearrange(image, "b c h w -> b (h w) c")  # [batch_size, seq_len, channels]
-#         tabular_token = tabular.unsqueeze(1)  # [batch_size, 1, channels]
-#
-#         # Compute QKV for image and tabular data
-#         img_qkv = self.img_qkv(self.img_norm(image_token))  # [batch_size, seq_len, 3 * channels]
-#         tab_qkv = self.tab_qkv(self.tab_norm(tabular_token))  # [batch_size, 1, 3 * channels]
-#
-#         # Concatenate QKV tensors along the sequence length
-#         qkv = torch.cat([img_qkv, tab_qkv], dim=1)  # [batch_size, seq_len + 1, 3 * channels]
-#         qkv = qkv.transpose(1, 2)  # [batch_size, 3 * channels, seq_len + 1]
-#
-#         # Apply attention
-#         total_len = image_token.shape[1] + tabular_token.shape[1]
-#         image_len = image_token.shape[1]
-#         tabular_len = tabular_token.shape[1]
-#
-#         img_attn, tab_attn = self.attention(qkv, image_len=image_len, tabular_len=tabular_len)
-#
-#         # Reshape back to original dimensions
-#         image_h = img_attn.transpose(1, 2).view(b, c, h, w)  # [batch_size, channels, h, w]
-#         image_h = self.img_proj_out(image_h.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)  # [batch_size, channels, h, w]
-#         image_out = image + image_h
-#
-#         tabular_h = tab_attn.transpose(1, 2).squeeze(2)  # [batch_size, channels]
-#         tabular_h = self.tab_proj_out(tabular_h)
-#         tabular_out = tabular + tabular_h
-#
-#         return image_out, tabular_out
 
 
 class QKVAttention(nn.Module):
@@ -619,10 +726,15 @@ class QKVAttention(nn.Module):
     A module which performs QKV attention for cross-attention between image and tabular data.
     """
 
-    def __init__(self, n_heads):
+    def __init__(self, n_heads, debug=False):
         super().__init__()
         self.n_heads = n_heads
+        self.debug = debug
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="QKVAttention", debug_logger=debug_logger)
+
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, qkv, image_len, tabular_len):
         """
         Apply QKV attention.
@@ -633,16 +745,27 @@ class QKVAttention(nn.Module):
         :return: Attention outputs for both image and tabular tokens.
         """
 
+        if self.debug:
+            debug_print_stats(qkv, "QKVAttention - input qkv", debug_logger=debug_logger)
+
         bs, width, length = qkv.shape
-        assert width % (3 * self.n_heads) == 0
+        assert width % (3 * self.n_heads) == 0, (f"width={width} is not divisible by 3*n_heads={3 * self.n_heads}")
         ch = width // (3 * self.n_heads)
 
         # Split Q, K, V from concatenated input
         qkv = qkv.view(bs, self.n_heads, 3 * ch, length)
+        if self.debug:
+            debug_print_stats(qkv, "QKVAttention - qkv reshaped to [B, n_heads, 3*ch, length]", debug_logger=debug_logger)
+
         q, k, v = qkv.split(ch, dim=2)  # Each has shape [batch_size, n_heads, ch, length]
+        if self.debug:
+            debug_print_stats(q, "Q shape", debug_logger=debug_logger)
+            debug_print_stats(k, "K shape", debug_logger=debug_logger)
+            debug_print_stats(v, "V shape", debug_logger=debug_logger)
+
         scale = 1 / math.sqrt(ch)
 
-        # Separate Q, K, V for image and tabular parts
+        # Separate Q, K, V for image vs. tabular tokens
         img_q = q[..., :image_len]  # [bs, n_heads, ch, image_len]
         img_k = k[..., :image_len]
         img_v = v[..., :image_len]
@@ -652,20 +775,26 @@ class QKVAttention(nn.Module):
         tab_v = v[..., image_len:]
 
         # Image queries attend to tabular keys/values
-        img_weight = th.softmax(
-            th.einsum("bncl,bncs->bnls", img_q * scale, tab_k * scale), dim=-1
-        )  # [bs, n_heads, image_len, tabular_len]
+        img_weight = th.einsum("bncl,bncs->bnls", img_q * scale, tab_k * scale)
+        img_weight = th.softmax(img_weight.float(), dim=-1).type(img_weight.dtype)
+        if self.debug:
+            debug_print_stats(img_weight, "QKVAttention - img_weight after softmax", debug_logger=debug_logger)
         img_a = th.einsum("bnls,bncs->bncl", img_weight, tab_v)  # [bs, n_heads, ch, image_len]
 
         # Tabular queries attend to image keys/values
-        tab_weight = th.softmax(
-            th.einsum("bncl,bncs->bnls", tab_q * scale, img_k * scale), dim=-1
-        )  # [bs, n_heads, tabular_len, image_len]
+        tab_weight = th.einsum("bncl,bncs->bnls", tab_q * scale, img_k * scale)
+        tab_weight = th.softmax(tab_weight.float(), dim=-1).type(tab_weight.dtype)
+        if self.debug:
+            debug_print_stats(tab_weight, "QKVAttention - tab_weight after softmax", debug_logger=debug_logger)
         tab_a = th.einsum("bnls,bncs->bncl", tab_weight, img_v)  # [bs, n_heads, ch, tabular_len]
 
         # Reshape back to original dimensions
         img_a = img_a.reshape(bs, -1, image_len)  # [bs, n_heads * ch, image_len]
         tab_a = tab_a.reshape(bs, -1, tabular_len)  # [bs, n_heads * ch, tabular_len]
+
+        if self.debug:
+            debug_print_stats(img_a, "QKVAttention - img_a output", debug_logger=debug_logger)
+            debug_print_stats(tab_a, "QKVAttention - tab_a output", debug_logger=debug_logger)
 
         return img_a, tab_a
 
@@ -679,15 +808,10 @@ class CrossAttentionBlock(nn.Module):
     Cross-attention block for image and tabular data.
     """
 
-    def __init__(
-        self,
-        channels,
-        num_heads=1,
-        num_head_channels=-1,
-        use_checkpoint=False,
-    ):
+    def __init__(self, channels, num_heads=1, num_head_channels=-1, use_checkpoint=False, debug=False):
         super().__init__()
         self.channels = channels
+        self.debug = debug
 
         # Set the number of heads
         if num_head_channels == -1:
@@ -700,28 +824,35 @@ class CrossAttentionBlock(nn.Module):
 
         self.use_checkpoint = use_checkpoint
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="CrossAttentionBlock", debug_logger=debug_logger)
+
         # Normalization layers
         self.img_norm = normalization(self.channels)
         self.tab_norm = normalization(self.channels)
 
         # QKV computation for image and tabular data
-        # self.img_qkv = nn.Linear(self.channels, self.channels * 3)
         self.img_qkv = conv_nd(1, self.channels, self.channels * 3, kernel_size=1)
         self.tab_qkv = nn.Linear(self.channels, self.channels * 3)
 
         # Attention
-        self.attention = QKVAttention(self.num_heads)
+        self.attention = QKVAttention(self.num_heads, debug=self.debug)
 
         # Projection layers for image and tabular
-        # self.img_proj_out = zero_module(nn.Linear(self.channels, self.channels))
         # TODO: check for initialization instead of zero_module (eg. Kaiming initialization for convolutional layers)
-        self.img_proj_out = zero_module(ImageConv(self.channels, self.channels, kernel_size=1))
-        # self.tab_proj_out = zero_module(TabularMLP(self.channels, self.channels))
-        self.tab_proj_out = TabularMLP(self.channels, self.channels)
+        self.img_proj_out = zero_module(ImageConv(self.channels, self.channels, kernel_size=1, debug=self.debug))
+        self.tab_proj_out = TabularMLP(self.channels, self.channels, debug=self.debug)
 
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, image, tabular):
+
+        if self.debug:
+            debug_print_stats(image, "CrossAttentionBlock - input image", debug_logger=debug_logger)
+            debug_print_stats(tabular, "CrossAttentionBlock - input tabular", debug_logger=debug_logger)
+
         return checkpoint(self._forward, (image, tabular), self.parameters(), self.use_checkpoint)
 
+    @debug_forward(debug_logger=debug_logger)
     def _forward(self, image, tabular):
         """
         Forward method for cross-attention between image and tabular data.
@@ -730,43 +861,77 @@ class CrossAttentionBlock(nn.Module):
         :param tabular: Tabular tensor of shape [batch_size, channels]
         :return: Updated image and tabular data with cross-attention applied.
         """
+
         b, c, h, w = image.shape  # Image dimensions
         b_t, c_t = tabular.shape   # Tabular dimensions (channels)
 
-        # Flatten spatial dimensions for image tokens
+        # Flatten spatial dimensions for image tokens => [B, C, H*W]
         image_token = rearrange(image, "b c h w -> b c (h w)")  # [batch_size, channels, seq_len]
         seq_len_image = image_token.shape[2]
-        # tabular_token = tabular.unsqueeze(1)  # [batch_size, 1, channels]
+        if self.debug:
+            debug_print_stats(image_token, "CrossAttentionBlock - flattened image_token", debug_logger=debug_logger)
+
+        # Tabular is [B, C]; treat as length=1 "token"
         tabular_token = tabular
+        tabular_len = 1
 
         # Normalize
         image_token = self.img_norm(image_token)
         tabular_token = self.tab_norm(tabular_token)
+        if self.debug:
+            debug_print_stats(image_token, "CrossAttentionBlock - image_token after norm", debug_logger=debug_logger)
+            debug_print_stats(tabular_token, "CrossAttentionBlock - tabular_token after norm", debug_logger=debug_logger)
 
         # Compute QKV for image and tabular data
-        img_qkv = self.img_qkv(image_token)  # [batch_size, seq_len, 3 * channels]
-        tab_qkv = self.tab_qkv(tabular_token)  # [batch_size, 1, 3 * channels]
+        # For image: shape is [B, C, seq_len_image], conv_nd(1) -> [B, 3*C, seq_len_image]
+        img_qkv = self.img_qkv(image_token)
+        if self.debug:
+            debug_print_stats(img_qkv, "CrossAttentionBlock - img_qkv", debug_logger=debug_logger)
 
-        # Concatenate along sequence length dimension
-        # qkv = torch.cat([img_qkv.transpose(1, 2), tab_qkv.transpose(1, 2)], dim=2)  # [batch_size, 3 * channels, total_len]
-        qkv = torch.cat([img_qkv, tab_qkv.unsqueeze(2)], dim=2)  # [batch_size, 3 * channels, seq_len + 1]
+        # For tabular: shape is [B, C], linear -> [B, 3*C]
+        tab_qkv = self.tab_qkv(tabular_token)  # => [B, 3*C]
+        if self.debug:
+            debug_print_stats(tab_qkv, "CrossAttentionBlock - tab_qkv (raw)", debug_logger=debug_logger)
+
+        # We want to combine them along the 'length' dimension => unsqueeze tab_qkv to [B, 3*C, 1]
+        tab_qkv = tab_qkv.unsqueeze(2)  # => [B, 3*C, 1]
+        if self.debug:
+            debug_print_stats(tab_qkv, "CrossAttentionBlock - tab_qkv (unsqueezed)", debug_logger=debug_logger)
+
+        # Concatenate => qkv is [B, 3*C, seq_len_image + 1]
+        qkv = torch.cat([img_qkv, tab_qkv], dim=2)
+        if self.debug:
+            debug_print_stats(qkv, "CrossAttentionBlock - concatenated qkv", debug_logger=debug_logger)
 
         # Apply cross-attention
-        image_len = seq_len_image
-        tabular_len = 1
-        img_a, tab_a = self.attention(qkv, image_len=image_len, tabular_len=tabular_len)
+        img_a, tab_a = self.attention(qkv, image_len=seq_len_image, tabular_len=tabular_len)
+        # shapes:
+        #   img_a => [B, n_heads*ch, seq_len_image]
+        #   tab_a => [B, n_heads*ch, 1]
 
-        # Reshape back to original dimensions
-        image_h = img_a.transpose(1, 2).reshape(b, h, w, c).permute(0, 3, 1, 2)  # [batch_size, channels, h, w]
+        # Reshape image back to [B, C, H, W]
+        # We have n_heads * ch == self.channels if everything lines up
+        image_h = img_a.transpose(1, 2).reshape(b, h, w, c).permute(0, 3, 1, 2)
+        if self.debug:
+            debug_print_stats(image_h, "CrossAttentionBlock - image_h before proj_out", debug_logger=debug_logger)
+
+        # Final projection + skip connection
         image_h = self.img_proj_out(image_h)
         image_out = image + image_h
+        if self.debug:
+            debug_print_stats(image_out, "CrossAttentionBlock - image_out (skip-connected)", debug_logger=debug_logger)
 
-        tabular_h = tab_a.transpose(1, 2).squeeze(1)  # [batch_size, channels]
+        # Reshape tabular back => [B, n_heads*ch], then final MLP + skip
+        tabular_h = tab_a.transpose(1, 2).squeeze(1)  # => [B, n_heads*ch]
+        if self.debug:
+            debug_print_stats(tabular_h, "CrossAttentionBlock - tabular_h before proj_out", debug_logger=debug_logger)
+
         tabular_h = self.tab_proj_out(tabular_h)
         tabular_out = tabular + tabular_h
+        if self.debug:
+            debug_print_stats(tabular_out, "CrossAttentionBlock - tabular_out (skip-connected)", debug_logger=debug_logger)
 
         return image_out, tabular_out
-
 
 
 class MultimodalUNet(nn.Module):
@@ -774,29 +939,13 @@ class MultimodalUNet(nn.Module):
     The full coupled-UNet model with attention and timestep embedding, adapted for image and tabular data.
     """
 
-    def __init__(
-            self,
-            image_size,
-            tabular_size,
-            model_channels,
-            image_out_channels,
-            tabular_out_channels,
-            num_res_blocks,
-            cross_attention_resolutions,
-            image_attention_resolutions,
-            tabular_attention_resolutions,
-            dropout=0,
-            channel_mult=(1, 2, 3, 4),
-            num_classes=None,
-            use_checkpoint=False,
-            use_fp16=False,
-            num_heads=1,
-            num_head_channels=-1,
-            num_heads_upsample=-1,
-            use_scale_shift_norm=False,
-            resblock_updown=True,
-    ):
+    def __init__(self, image_size, tabular_size, model_channels, image_out_channels, tabular_out_channels,
+                 num_res_blocks, cross_attention_resolutions, image_attention_resolutions,
+                 tabular_attention_resolutions, dropout=0, channel_mult=(1, 2, 3, 4), num_classes=None,
+                 use_checkpoint=False, use_fp16=False, num_heads=1, num_head_channels=-1, num_heads_upsample=-1,
+                 use_scale_shift_norm=False, resblock_updown=True, debug=False, ):
         super().__init__()
+        self.debug = debug
 
         if num_heads_upsample == -1:
             num_heads_upsample = num_heads
@@ -818,6 +967,7 @@ class MultimodalUNet(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
+        self.debug = debug
 
         time_embed_dim = model_channels
         self.time_embed = nn.Sequential(
@@ -833,10 +983,16 @@ class MultimodalUNet(nn.Module):
         self._feature_size = ch
         input_block_chans = [ch]
 
+        if self.debug:
+            register_gradient_hooks(self, name_prefix="MultimodalUNet", debug_logger=debug_logger)
+
         # Initial input blocks
-        self.input_blocks = nn.ModuleList([TimestepEmbedSequential(InitialBlock(
-            self.image_size[0], self.tabular_size, image_out_channels=ch, tabular_out_features=ch
-        ))])
+        self.input_blocks = nn.ModuleList(
+            [TimestepEmbedSequential(
+                InitialBlock(self.image_size[0], self.tabular_size, image_out_channels=ch,
+                             tabular_out_features=ch, debug=self.debug),
+                debug=self.debug)
+            ])
 
         ds = 1
 
@@ -854,22 +1010,24 @@ class MultimodalUNet(nn.Module):
                         image_attention=ds in self.image_attention_resolutions,
                         tabular_attention=ds in self.tabular_attention_resolutions,
                         num_heads=num_heads,
+                        debug=self.debug,
                     )
                 ]
 
                 ch = int(mult * model_channels)
 
-                if ds in self.cross_attention_resolutions:
+                if ds in self.cross_attention_resolutions and cross_attn_active:
                     layers.append(
                         CrossAttentionBlock(
                             ch,
                             use_checkpoint=use_checkpoint,
                             num_heads=num_heads,
                             num_head_channels=num_head_channels,
+                            debug=self.debug,
                         )
                     )
 
-                self.input_blocks.append(TimestepEmbedSequential(*layers))
+                self.input_blocks.append(TimestepEmbedSequential(*layers, debug=self.debug,))
                 self._feature_size += ch
                 input_block_chans.append(ch)
 
@@ -885,7 +1043,9 @@ class MultimodalUNet(nn.Module):
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
                             down=True,
-                        )
+                            debug=self.debug,
+                        ),
+                        debug=self.debug
                     )
                 )
                 input_block_chans.append(ch)
@@ -903,12 +1063,18 @@ class MultimodalUNet(nn.Module):
                 image_attention=True,
                 tabular_attention=True,
                 num_heads=num_heads,
+                debug=self.debug,
             ),
-            CrossAttentionBlock(
-                ch,
-                use_checkpoint=use_checkpoint,
-                num_heads=num_heads,
-                num_head_channels=num_head_channels,
+            *(
+                [
+                    CrossAttentionBlock(
+                        ch,
+                        use_checkpoint=use_checkpoint,
+                        num_heads=num_heads,
+                        num_head_channels=num_head_channels,
+                        debug=self.debug,
+                    )
+                ] if cross_attn_active else []
             ),
             ResBlock(
                 ch,
@@ -919,7 +1085,9 @@ class MultimodalUNet(nn.Module):
                 image_attention=True,
                 tabular_attention=True,
                 num_heads=num_heads,
+                debug=self.debug,
             ),
+            debug=self.debug
         )
         self._feature_size += ch
 
@@ -939,17 +1107,19 @@ class MultimodalUNet(nn.Module):
                         image_attention=ds in self.image_attention_resolutions,
                         tabular_attention=ds in self.tabular_attention_resolutions,
                         num_heads=num_heads,
+                        debug=self.debug,
                     )
                 ]
 
                 ch = int(model_channels * mult)
-                if ds in self.cross_attention_resolutions:
+                if ds in self.cross_attention_resolutions and cross_attn_active:
                     layers.append(
                         CrossAttentionBlock(
                             ch,
                             use_checkpoint=use_checkpoint,
                             num_heads=num_heads,
                             num_head_channels=num_head_channels,
+                            debug=self.debug,
                         )
                     )
 
@@ -965,24 +1135,24 @@ class MultimodalUNet(nn.Module):
                                 use_checkpoint=use_checkpoint,
                                 use_scale_shift_norm=use_scale_shift_norm,
                                 up=True,
+                                debug=self.debug,
                             )
                         )
                         ds //= 2
 
                 self._feature_size += ch
-                self.output_blocks.append(TimestepEmbedSequential(*layers))
+                self.output_blocks.append(TimestepEmbedSequential(*layers, debug=self.debug,))
 
         # Output projections
         self.tabular_out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),
-            # zero_module(TabularMLP(ch, tabular_out_channels)),
-            TabularMLP(ch, tabular_out_channels)
+            TabularMLP(ch, tabular_out_channels, debug=self.debug,)
         )
         self.image_out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),
-            zero_module(ImageConv(ch, image_out_channels, kernel_size=3)),
+            zero_module(ImageConv(ch, image_out_channels, kernel_size=3, debug=self.debug)),
         )
 
     # Methods for FP16 conversion
@@ -1006,6 +1176,7 @@ class MultimodalUNet(nn.Module):
         self.image_out.apply(convert_module_to_f32)
         self.tabular_out.apply(convert_module_to_f32)
 
+    @debug_forward(debug_logger=debug_logger)
     def forward(self, image, tabular, timesteps, label=None):
         """
         Apply the model to an input batch.
@@ -1020,6 +1191,10 @@ class MultimodalUNet(nn.Module):
                 self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
 
+        if self.debug:
+            debug_print_stats(image, "MultimodalUNet.forward - image (input)", debug_logger=debug_logger)
+            debug_print_stats(tabular, "MultimodalUNet.forward - tabular (input)", debug_logger=debug_logger)
+
         # Lists to store intermediate outputs for skip connections
         image_hs = []
         tabular_hs = []
@@ -1032,6 +1207,9 @@ class MultimodalUNet(nn.Module):
             assert label.shape == (image.shape[0],)
             emb = emb + self.label_emb(label)
 
+        if self.debug:
+            debug_print_stats(emb, f"MultimodalUNet.forward - emb (time + num_classes:{self.num_classes})", debug_logger=debug_logger)
+
         # Ensure inputs are in the correct dtype
         image = image.type(self.dtype)
         tabular = tabular.type(self.dtype)
@@ -1042,19 +1220,43 @@ class MultimodalUNet(nn.Module):
             image_hs.append(image)
             tabular_hs.append(tabular)
 
+            if self.debug:
+                debug_print_stats(image, f"MultimodalUNet - input_block {m_id} output (image)", debug_logger=debug_logger)
+                debug_print_stats(tabular, f"MultimodalUNet - input_block {m_id} output (tabular)", debug_logger=debug_logger)
+
         # Middle blocks
         image, tabular = self.middle_blocks(image, tabular, emb)
+        if self.debug:
+            debug_print_stats(image, "MultimodalUNet - middle_blocks output (image)", debug_logger=debug_logger)
+            debug_print_stats(tabular, "MultimodalUNet - middle_blocks output (tabular)", debug_logger=debug_logger)
 
         # Decoder: Process through output blocks, adding skip connections
         for m_id, module in enumerate(self.output_blocks):
-            image = th.cat([image, image_hs.pop()], dim=1)
-            # tabular = tabular + tabular_hs.pop()  # For tabular data, we sum skip connections
-            tabular = th.cat([tabular, tabular_hs.pop()], dim=1)
+            # Cat skip connection for image
+            skip_img = image_hs.pop()
+            image = th.cat([image, skip_img], dim=1)
+            if self.debug:
+                debug_print_stats(image, f"MultimodalUNet - image after cat skip {m_id}", debug_logger=debug_logger)
+
+            # Cat skip connection for tabular
+            skip_tab = tabular_hs.pop()
+            # The code uses cat rather than sum for tabular skip
+            # => [N, feats + feats], #TODO: watch out for shape alignment
+            tabular = th.cat([tabular, skip_tab], dim=1)
+            if self.debug:
+                debug_print_stats(tabular, f"MultimodalUNet - tabular after cat skip {m_id}", debug_logger=debug_logger)
+
             image, tabular = module(image, tabular, emb)
+            if self.debug:
+                debug_print_stats(image, f"MultimodalUNet - output_block {m_id} out (image)", debug_logger=debug_logger)
+                debug_print_stats(tabular, f"MultimodalUNet - output_block {m_id} out (tabular)", debug_logger=debug_logger)
 
         # Final output layers for image and tabular data
         image = self.image_out(image)
         tabular = self.tabular_out(tabular)
+        if self.debug:
+            debug_print_stats(image, "MultimodalUNet.forward - image_out (final)", debug_logger=debug_logger)
+            debug_print_stats(tabular, "MultimodalUNet.forward - tabular_out (final)", debug_logger=debug_logger)
 
         return image, tabular
 

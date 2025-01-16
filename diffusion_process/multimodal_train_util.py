@@ -19,6 +19,7 @@ from diffusion_process.evaluation_metrics import (compute_mmd_tabular, compute_f
 from diffusion_process.metrics_utilities import plot_metrics
 import time
 from diffusers.models import AutoencoderKL
+from multi_modal_diffusion.custom_logger import DebugLogger
 
 INITIAL_LOG_LOSS_SCALE = 20.0
 
@@ -56,7 +57,7 @@ class TrainLoop:
             num_classes=0,
             save_row=2,
             eval_interval=1,  # Evaluate every epoch by default
-            num_eval_samples=20
+            num_eval_samples=20,
     ):
         self.model = model
         self.diffusion = diffusion
@@ -226,7 +227,12 @@ class TrainLoop:
 
 
     def run_loop(self):
+
         for epoch in range(self.num_epochs):
+            # debug logger to start a new epoch folder and file
+            from multi_modal_diffusion.configs.defaults import debug_logger
+            debug_logger.start_epoch(epoch + 1)
+
             logger.log(f"Starting epoch {epoch + 1}/{self.num_epochs}")
             # If using a DistributedSampler, set the epoch for proper shuffling.
             if isinstance(self.data.sampler, th.utils.data.DistributedSampler):
@@ -254,7 +260,7 @@ class TrainLoop:
                     # Run for a finite amount of time in integration tests.
 
                     # TODO: fix save sample
-                    self.save_samples()
+                    # self.save_samples()
                     if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                         return
 
@@ -275,10 +281,13 @@ class TrainLoop:
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             # debug_memory("Before final save:")
-            self.save()
+            # self.save()
             # debug_memory("After final save:")
+            ...
 
-        plot_metrics()
+        # plot_metrics()
+
+        debug_logger.close()
 
     def run_step(self, batch, cond={}):
         self.mp_trainer.zero_grad()
