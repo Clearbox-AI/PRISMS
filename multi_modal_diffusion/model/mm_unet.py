@@ -10,7 +10,7 @@ from multi_modal_diffusion.arch_utils import (conv_nd, avg_pool_nd, normalizatio
                         timestep_embedding)
 from multi_modal_diffusion.fp16_util import (convert_module_to_f16, convert_module_to_f32)
 from multi_modal_diffusion import logger
-from multi_modal_diffusion.custom_logger import (register_gradient_hooks, debug_print_stats, debug_forward)
+from multi_modal_diffusion.utils.custom_logger import (register_gradient_hooks, debug_print_stats, debug_forward)
 from multi_modal_diffusion.configs.defaults import (debug_logger, single_attn_active, cross_attn_active)
 
 

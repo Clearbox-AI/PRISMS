@@ -19,7 +19,10 @@ from diffusion_process.evaluation_metrics import (compute_mmd_tabular, compute_f
 from diffusion_process.metrics_utilities import plot_metrics
 import time
 from diffusers.models import AutoencoderKL
-from multi_modal_diffusion.custom_logger import DebugLogger
+from multi_modal_diffusion.utils.custom_logger import DebugLogger
+from torch.utils.tensorboard import SummaryWriter
+import datetime
+from multi_modal_diffusion.configs.defaults import output_dir
 
 INITIAL_LOG_LOSS_SCALE = 20.0
 
@@ -91,6 +94,12 @@ class TrainLoop:
 
         self.sync_cuda = th.cuda.is_available()
         self.sample_fn = sample_fn
+
+        # TODO: try tensorboard
+        ######################################################################################
+        current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.writer = SummaryWriter(log_dir=f"{output_dir}/tensorboard_{current_time}")
+        ######################################################################################
 
         print("DEBUG: Initializing TrainLoop")
         # debug_memory("Init start:")
@@ -296,7 +305,7 @@ class TrainLoop:
         if took_step:
             self._update_ema()
         self._anneal_lr()
-        self.log_step()
+        self.log_step(loss)
         return loss
 
 
@@ -477,9 +486,32 @@ class TrainLoop:
         for param_group in self.opt.param_groups:
             param_group["lr"] = lr
 
-    def log_step(self):
+    def log_step(self, loss):
+        # 1) Basic metrics
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
+
+        # 2) TensorBoard logging
+        # a) Log each loss component
+        if isinstance(loss, dict):
+            for name, value in loss.items():
+                # Ensure the value is a scalar tensor
+                if isinstance(value, th.Tensor) and value.dim() == 0:
+                    self.writer.add_scalar(f"Loss/train/{name}", value.item(), self.step)
+                else:
+                    logger.warn(f"Loss component '{name}' is not a scalar tensor and cannot be logged.")
+        else:
+            # If loss is a single scalar tensor
+            self.writer.add_scalar("Loss/train", loss.item(), self.step)
+
+        # b) Log histograms for gradients
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                self.writer.add_histogram(f"Gradients/{name}", param.grad, self.step)
+
+        # # c) Log histograms for parameters
+        # for name, param in self.model.named_parameters():
+        #     self.writer.add_histogram(f"Weights/{name}", param.data, self.step)
 
 
     def save_samples(self):
@@ -806,7 +838,10 @@ def find_ema_checkpoint(main_checkpoint, step, rate):
 
 def log_loss_dict(diffusion, ts, losses):
     for key, values in losses.items():
-        logger.logkv_mean(key, values.mean().item())
+        try:
+            logger.logkv_mean(key, values.mean().item())
+        except:
+            ...
         # Log the quantiles (four quartiles, in particular).
         for sub_t, sub_loss in zip(ts.cpu().numpy(), values.detach().cpu().numpy()):
             quartile = int(4 * sub_t / diffusion.num_timesteps)

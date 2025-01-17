@@ -1,10 +1,10 @@
 import argparse
 from diffusion_process.enums import DatasetType
-from multi_modal_diffusion.custom_logger import DebugLogger
+from multi_modal_diffusion.utils.custom_logger import DebugLogger
 
 output_dir = "/mnt/storage/nacc_sub/tmp"
-single_attn_active = True
-cross_attn_active = True
+single_attn_active = False
+cross_attn_active = False
 
 # INITIALIZE CUSTOM DEBUG
 debug_logger = DebugLogger(base_dir=output_dir)

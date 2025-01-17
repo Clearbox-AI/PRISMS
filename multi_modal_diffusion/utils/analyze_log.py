@@ -1,27 +1,69 @@
 import re
 import pandas as pd
 import os
+from collections import defaultdict
+from pathlib import Path
+
+def parse_and_merge_hook(rows):
+    """
+    Parse gradient log rows into a dictionary and merge duplicate keys by averaging values.
+
+    Parameters:
+        rows (list of str): List of gradient log strings.
+
+    Returns:
+        dict: Dictionary where key -> [average_min, average_max, average_mean].
+              Example: {
+                "layer.weight": [min_val, max_val, mean_val],
+                "layer.bias":   [min_val, max_val, mean_val]
+              }
+    """
+    pattern = r"^(.*?) -> grad.*min=(-?\d[\d.e\-+]*), max=(-?\d[\d.e\-+]*), mean=(-?\d[\d.e\-+]*)"
+
+    aggregated_data = defaultdict(lambda: [0.0, 0.0, 0.0, 0])  # [sum_min, sum_max, sum_mean, count]
+
+    for row in rows:
+        row = row.strip()
+        match = re.match(pattern, row)
+        if match:
+            key = ".".join(match.group(1).strip().split(".")[:-1])
+            min_val, max_val, mean_val = map(float, match.groups()[1:])
+            aggregated_data[key][0] += min_val
+            aggregated_data[key][1] += max_val
+            aggregated_data[key][2] += mean_val
+            aggregated_data[key][3] += 1
+
+    # Compute averages
+    result = {}
+    for key, (sum_min, sum_max, sum_mean, count) in aggregated_data.items():
+        if count > 0:
+            avg_min  = sum_min / count
+            avg_max  = sum_max / count
+            avg_mean = sum_mean / count
+            result[key] = [avg_min, avg_max, avg_mean]
+    return result
+
 
 def parse_epoch_log(log_lines):
     """
     Parse a full epoch log (with multiple iterations).
-    Returns a list of dicts, each containing:
+    Returns a tuple of:
+      parsed_records,  # list of dicts with shape stats
+      hooks_by_iter    # dict mapping iteration -> parse_and_merge_hook result
+    where each entry in parsed_records is:
       {
-        "iteration": int,               # which iteration this record belongs to
-        "region": str,                  # "pre-input", "input", "middle", "output", or None
-        "class_path": str,              # e.g. "TimestepEmbedSequential->ResBlock->ImageConv"
-        "shape": str,                   # e.g. "4, 192, 64, 64"
+        "iteration": int,
+        "region": str,       # "pre-input", "input", "middle", "output", or None
+        "class_path": str,   # e.g. "TimestepEmbedSequential->ResBlock->ImageConv"
+        "shape": str,        # e.g. "4, 192, 64, 64"
         "min": float,
         "max": float,
         "mean": float,
-        "raw_line": str                 # original log line (optional)
+        "raw_line": str
       }
     """
 
-    # -- REGEX PATTERNS --
-
-    # Lines that contain shape stats:
-    # e.g. "shape: [4, 192, 64, 64], min: -3.5586, max: 3.4881, mean: -0.0066"
+    # -- REGEX for shape lines --
     shape_stat_pattern = re.compile(
         r"shape:\s*\[(.*?)\],\s*min:\s*([-0-9\.]+),\s*max:\s*([-0-9\.]+),\s*mean:\s*([-0-9\.]+)"
     )
@@ -30,74 +72,64 @@ def parse_epoch_log(log_lines):
     entering_pattern = re.compile(r"Entering\s+(\w+)\.forward\(\)\.*")
     exiting_pattern  = re.compile(r"Exiting\s+(\w+)\.forward\(\)\.*")
 
-    # Region detection patterns:
-    #   - "Entering MultimodalUNet.forward()" => region = "pre-input"
-    #   - "MultimodalUNet - input_block 0"   => region = "input"
-    #   - "MultimodalUNet - middle_blocks"   => region = "middle"
-    #   - "MultimodalUNet - output_block 2"  => region = "output"
+    # Region detection patterns
     re_enter_multimodal = re.compile(r"Entering\s+MultimodalUNet\.forward\(\)\.*")
     re_inp_block        = re.compile(r"MultimodalUNet\s*-\s*input_block\s+(\d+)")
     re_mid_block        = re.compile(r"MultimodalUNet\s*-\s*middle_blocks")
     re_out_block        = re.compile(r"MultimodalUNet\s*-\s*output_block\s+(\d+)")
 
-    # -- STATE VARIABLES --
-
-    # iteration starts at 1; each "[GRAD HOOK]" triggers iteration += 1
     iteration = 1
-
-    # region can be one of "pre-input", "input", "middle", "output", or None
     region = None
-
-    # context stack for nested classes
     context_stack = []
 
-    # list of all parsed entries
     parsed_records = []
 
-    # -- MAIN PARSE LOOP --
+    # dict of iteration -> list of hook lines
+    hook_lines_for_iter = defaultdict(list)
 
     was_hooked = False
     for line in log_lines:
-        if "Exiting MultimodalUNet.forward()" in line:
-            c = 4
-        line = line.rstrip("\n")
+        # store the raw line for reference
+        original_line = line.rstrip("\n")
+
+        # # Check if line is a gradient hook line
+        # if "[GRAD HOOK]" in line:
+        #     hook_lines_for_iter[iteration].append(original_line)
 
         # 0) Detect new iteration boundary:
         #    If line contains "[GRAD HOOK]", we move to the next iteration
-        if "[GRAD HOOK]" in line and not was_hooked:
-            iteration += 1
-            was_hooked = True
+        if "[GRAD HOOK]" in line:
+            if not was_hooked:
+                iteration += 1
+                was_hooked = True
+            hook_lines_for_iter[iteration-1].append(original_line)
             continue
 
-        # 1) Region detection updates:
-        if re_enter_multimodal.search(line):
+        # region detection
+        if re_enter_multimodal.search(original_line):
             region = "pre-input"
         else:
-            # If we see lines like "MultimodalUNet - input_block 0 output (image)..."
-            # or "MultimodalUNet - middle_blocks output..."
-            # or "MultimodalUNet - output_block 2..."
-            # we set region accordingly.
-            inp_match = re_inp_block.search(line)
+            inp_match = re_inp_block.search(original_line)
             if inp_match:
                 region = "input"
 
-            mid_match = re_mid_block.search(line)
+            mid_match = re_mid_block.search(original_line)
             if mid_match:
                 region = "middle"
 
-            out_match = re_out_block.search(line)
+            out_match = re_out_block.search(original_line)
             if out_match:
                 region = "output"
 
-        # 2) Check for "Entering X.forward()" -> push on context_stack
-        ent = entering_pattern.search(line)
+        # "Entering X.forward()" -> push context
+        ent = entering_pattern.search(original_line)
         if ent:
-            class_name = ent.group(1)  # e.g. "TimestepEmbedSequential" or "ResBlock"
+            class_name = ent.group(1)
             context_stack.append(class_name)
             continue
 
-        # 3) Check for "Exiting X.forward()" -> pop from context_stack
-        ext = exiting_pattern.search(line)
+        # "Exiting X.forward()" -> pop context
+        ext = exiting_pattern.search(original_line)
         if ext:
             class_name = ext.group(1)
             if context_stack and context_stack[-1] == class_name:
@@ -105,20 +137,17 @@ def parse_epoch_log(log_lines):
                 was_hooked = False
             continue
 
-        # 4) Check for shape/min/max/mean lines
-        stat_match = shape_stat_pattern.search(line)
+        # shape line?
+        stat_match = shape_stat_pattern.search(original_line)
         if stat_match:
-            shape_str  = stat_match.group(1)   # e.g. "4, 192, 64, 64"
-            min_val    = float(stat_match.group(2))
-            max_val    = float(stat_match.group(3))
-            mean_val   = float(stat_match.group(4))
+            shape_str = stat_match.group(1)    # e.g. "4, 192, 64, 64"
+            min_val   = float(stat_match.group(2))
+            max_val   = float(stat_match.group(3))
+            mean_val  = float(stat_match.group(4))
 
-            # Build a class_path string from the stack
             if context_stack:
                 class_path = "->".join(context_stack)
             else:
-                # sometimes we might have no classes in the stack if the line is top-level
-                # (like "MultimodalUNet - input_block 0 output (image) - shape: ...")
                 class_path = "MultimodalUNet_top"
 
             record = {
@@ -129,24 +158,49 @@ def parse_epoch_log(log_lines):
                 "min": min_val,
                 "max": max_val,
                 "mean": mean_val,
-                "raw_line": line
+                "raw_line": original_line,
             }
             parsed_records.append(record)
 
-    return parsed_records
+    # After the loop, parse hook lines for each iteration
+    hooks_by_iter = {}
+    for iter_i, hook_lines in hook_lines_for_iter.items():
+        merged_data = parse_and_merge_hook(hook_lines)
+        hooks_by_iter[iter_i] = merged_data
+
+    # Return both shape stats & the merged hook stats by iteration
+    return parsed_records, hooks_by_iter
 
 
+# Example usage
 if __name__ == "__main__":
 
     log_folder_path = "/mnt/storage/nacc_sub/tmp"
-    for file_name in os.listdir(log_folder_path):
-        # Check if the file has a .log extension
-        if file_name.endswith(".log"):
-            file_path = os.path.join(log_folder_path, file_name)
-            with open(file_path, 'r') as file:
-                # Read all lines and strip trailing newlines or spaces
-                log_lines = [line for line in file]
-                parsed = parse_epoch_log(log_lines)
+    for epoch_folder in os.listdir(log_folder_path):
+        epoch_folder_path = Path(log_folder_path, epoch_folder)
+        # e.g. suppose each epoch_folder has exactly one ".log" file
+        log_files = [f for f in os.listdir(epoch_folder_path) if f.endswith(".log")]
+        if not log_files:
+            continue
+
+        log_path = Path(epoch_folder_path, log_files[0])
+        with open(log_path, "r") as f:
+            log_lines = f.readlines()
+
+        parsed_records, hooks_by_iter = parse_epoch_log(log_lines)
+
+        # Now you can turn parsed_records into a DataFrame if you wish:
+        df = pd.DataFrame(parsed_records)
+        print(f"Epoch folder: {epoch_folder}")
+        print(f"Shape Stats DataFrame:\n{df.head()}")
+
+        # hooks_by_iter is a dict mapping iteration -> { param_name: [avg_min, avg_max, avg_mean] }
+        for it, data_dict in hooks_by_iter.items():
+            print(f"\nIteration {it} gradient stats from parse_and_merge_hook():")
+            for param_name, (mn, mx, me) in data_dict.items():
+                print(f"  {param_name}: min={mn:.5f}, max={mx:.5f}, mean={me:.5f}")
+
+        print("-" * 60)
 
 
 
