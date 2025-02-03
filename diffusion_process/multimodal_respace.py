@@ -123,7 +123,22 @@ class SpacedDiffusion(GaussianDiffusion):
         # Scaling is done by the wrapped model.
         return t
 
+# TODO: ORIGINAL
+# class _WrappedModel:
+#     def __init__(self, model, timestep_map, rescale_timesteps, original_num_steps):
+#         self.model = model
+#         self.timestep_map = timestep_map
+#         self.rescale_timesteps = rescale_timesteps
+#         self.original_num_steps = original_num_steps
+#
+#     def __call__(self, image_x, tabular_x, ts, **kwargs):
+#         map_tensor = th.tensor(self.timestep_map, device=ts.device, dtype=ts.dtype)
+#         new_ts = map_tensor[ts]
+#         if self.rescale_timesteps:
+#             new_ts = new_ts.float() * (1000.0 / self.original_num_steps)
+#         return self.model(image_x, tabular_x, new_ts, **kwargs)
 
+# TODO: FOR SINGLE MODALITY
 class _WrappedModel:
     def __init__(self, model, timestep_map, rescale_timesteps, original_num_steps):
         self.model = model
@@ -131,9 +146,9 @@ class _WrappedModel:
         self.rescale_timesteps = rescale_timesteps
         self.original_num_steps = original_num_steps
 
-    def __call__(self, image_x, tabular_x, ts, **kwargs):
+    def __call__(self, image_x, ts, **kwargs):
         map_tensor = th.tensor(self.timestep_map, device=ts.device, dtype=ts.dtype)
         new_ts = map_tensor[ts]
         if self.rescale_timesteps:
             new_ts = new_ts.float() * (1000.0 / self.original_num_steps)
-        return self.model(image_x, tabular_x, new_ts, **kwargs)
+        return self.model(image_x, new_ts, **kwargs)

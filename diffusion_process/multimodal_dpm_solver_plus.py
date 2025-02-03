@@ -309,7 +309,17 @@ def model_wrapper(
             t_continuous = t_continuous.expand((x["image"].shape[0]))
         t_input = get_model_input_time(t_continuous)
         if cond is None:
-            image_output, tabular_output = model(x["image"], x["tabular"], t_input, **model_kwargs)
+            # TODO: MODIFICARE IN BASE AL TIPO DI NET
+            try:
+                # image_output, tabular_output = model(x["image"], x["tabular"], t_input, **model_kwargs)
+                ret = model(x["image"], x["tabular"], t_input, mask_ratio = 0, **model_kwargs)
+                image_output, tabular_output = ret["image_sample"], ret["tabular_sample"]
+            except:
+                # image_output = model(x["image"], t_input, **model_kwargs)
+                # tabular_output = x["tabular"]
+                ret = model(x["image"], t_input, mask_ratio=0, **model_kwargs)
+                image_output = ret["image_sample"]
+                tabular_output = x["tabular"]
         else:
             image_output, tabular_output = model(x["image"], x["tabular"], t_input, cond, **model_kwargs)
 

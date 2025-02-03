@@ -2,12 +2,13 @@ import argparse
 from diffusion_process.enums import DatasetType
 from multi_modal_diffusion.utils.custom_logger import DebugLogger
 
-output_dir = "/mnt/storage/nacc_sub/tmp"
+# output_dir = "/mnt/storage/nacc_sub/experiments"
+output_dir = "/mnt/storage/nacc_sub/mm_dit_NO_LAT"
 single_attn_active = False
 cross_attn_active = False
 
 # INITIALIZE CUSTOM DEBUG
-debug_logger = DebugLogger(base_dir=output_dir)
+debug_logger = None #DebugLogger(base_dir=output_dir)
 
 def get_default_config():
     """
@@ -24,20 +25,20 @@ def get_default_config():
     config.update(
         dict(
             data_dir="",
-            dataset_type=DatasetType.NACC_LATENTS,
+            dataset_type=DatasetType.IMAGE_TABULAR,
             schedule_sampler="uniform",
             lr=1e-4,
             t_lr=1e-4,
             seed=42,
             weight_decay=0.0,
             lr_anneal_steps=0,
-            batch_size=4,
+            batch_size=8,
             num_workers=0,
             microbatch=-1,
             ema_rate="0.9999",
             log_interval=10,
             devices=None,
-            save_interval=300,
+            save_interval=2000,
             output_dir=output_dir,
             resume_checkpoint="",
             use_fp16=False,
@@ -65,20 +66,20 @@ def get_default_config():
             cross_attention_shift=False,
             image_attention_resolutions="2,4,8,16",
             tabular_attention_resolutions="2,4,8,16",
-            channel_mult="1,2,3,4",
+            channel_mult="1,2",
             dropout=0.0,
             # This 'class_cond' was also in training defaults, so if you
             # want to unify them, you could remove from one or the other.
             # We'll keep the same name to keep consistent.
             # class_cond=False,
             use_checkpoint=False,
-            use_scale_shift_norm=True,
+            use_scale_shift_norm=False, #True,
             resblock_updown=True,
             use_fp16=False,
             image_type="2d",
             tabular_type="1d",
             freeze_mod=None,
-            debug=True
+            debug=False #True
         )
     )
 
@@ -86,7 +87,7 @@ def get_default_config():
     #    (You can pull these from your old `diffusion_defaults()` function)
     config.update(
         dict(
-            learn_sigma=True,
+            learn_sigma=False, #False
             diffusion_steps=2000, #1000,
             noise_schedule="linear",
             timestep_respacing="",

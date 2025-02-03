@@ -13,6 +13,7 @@ from einops import rearrange, repeat
 from multi_modal_diffusion.nn import mean_flat
 from multi_modal_diffusion.losses import normal_kl, discretized_gaussian_log_likelihood
 from multi_modal_diffusion import dist_util
+import torch.nn.functional as F
 
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
@@ -1249,185 +1250,445 @@ class GaussianDiffusion:
     #
     #     return term
 
-    def multimodal_training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+    # def multimodal_training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+    #     """
+    #     Compute training losses for a single timestep, supporting:
+    #       - MSE only or MSE + partial-freeze KL if self.loss_type in [MSE, RESCALED_MSE].
+    #       - "Full KL" if self.loss_type in [KL, RESCALED_KL].
+    #
+    #     The "best practice" approach for stable multimodal training is:
+    #       - If we have LEARNED variance: do MSE on the mean/noise channels, plus a partial-freeze KL for the variance channels.
+    #       - If variance is not learned, do pure MSE.
+    #       - Possibly scale (rescale) the partial KL or the entire sum.
+    #
+    #     Args:
+    #       model: your multimodal diffusion model, outputs (image_out, tabular_out).
+    #       x_start: dict {"image": [N,...], "tabular": [N,...]} ground-truth data.
+    #       t: a 1D tensor of timesteps, shape [N].
+    #       model_kwargs: optional dict for conditioning.
+    #       noise: optional dict of noise for image/tabular.
+    #
+    #     Returns:
+    #       A dict with "loss" (a scalar Tensor) plus other partial terms for logging.
+    #     """
+    #     if model_kwargs is None:
+    #         model_kwargs = {}
+    #
+    #     w_mse_image = 1.0
+    #     w_mse_tabular = 1.0
+    #     w_vb = 1.0
+    #
+    #     image_start = x_start["image"]  # shape [N, C, H, W]
+    #     tabular_start = x_start["tabular"]  # shape [N, F]
+    #
+    #     # 1) Sample or use provided noise
+    #     if noise is None:
+    #         noise = {
+    #             "image": th.randn_like(image_start),
+    #             "tabular": th.randn_like(tabular_start),
+    #         }
+    #
+    #     # 2) Forward diffuse: x_0 -> x_t
+    #     image_t = self.q_sample(image_start, t, noise=noise["image"])
+    #     tabular_t = self.q_sample(tabular_start, t, noise=noise["tabular"])
+    #
+    #     # 3) Model forward => (image_out, tabular_out)
+    #     image_out, tabular_out = model(
+    #         image_t,
+    #         tabular_t,
+    #         self._scale_timesteps(t),
+    #         **model_kwargs
+    #     )
+    #
+    #     # We'll store partial losses here
+    #     image_loss = {}
+    #     tabular_loss = {}
+    #
+    #     # 4) If we are learning variance, do partial freeze
+    #     if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
+    #         # Suppose image_out has shape [N, 2*C, H, W]
+    #         #        tabular_out has shape [N, 2*F]
+    #         c_img = image_start.shape[1]  # channels for image
+    #         c_tab = tabular_start.shape[1]  # features for tabular
+    #
+    #         # Split (mean, var) along dim=1
+    #         image_mean, image_var = th.split(image_out, c_img, dim=1)
+    #         tabular_mean, tabular_var = th.split(tabular_out, c_tab, dim=1)
+    #
+    #         # Partial freeze => .detach() on mean
+    #         image_frozen = th.cat([image_mean.detach(), image_var], dim=1)
+    #         tabular_frozen = th.cat([tabular_mean.detach(), tabular_var], dim=1)
+    #         frozen_dict = {"image": image_frozen, "tabular": tabular_frozen}
+    #
+    #         # Setup x_t dict for _vb_terms_bpd
+    #         x_t_dict = {"image": image_t, "tabular": tabular_t}
+    #
+    #         # Get vb (KL) from _vb_terms_bpd => shape [N] or scalar
+    #         vb_out = self._vb_terms_bpd(
+    #             model=lambda *args, r=frozen_dict: [r["image"], r["tabular"]],
+    #             x_start=x_start,
+    #             x_t=x_t_dict,
+    #             t=t,
+    #             clip_denoised=True,
+    #         )["output"]
+    #
+    #         # Store them (often shape [N], so we keep them as is)
+    #         image_loss["vb"] = vb_out["image"]
+    #         tabular_loss["vb"] = vb_out["tabular"]
+    #
+    #         # Possibly rescale if LossType.RESCALED_MSE is used
+    #         if self.loss_type == LossType.RESCALED_MSE:
+    #             scale_factor = self.num_timesteps / 1000.0
+    #             image_loss["vb"] *= scale_factor
+    #             tabular_loss["vb"] *= scale_factor
+    #
+    #         # The "predicted mean" to MSE against
+    #         image_pred = image_mean
+    #         tabular_pred = tabular_mean
+    #     else:
+    #         # If not learned variance, the entire output is the "mean"
+    #         image_pred = image_out
+    #         tabular_pred = tabular_out
+    #
+    #     # 5) Compute MSE for the mean part
+    #     #    Determine the MSE target for each modality
+    #     image_target = {
+    #         ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+    #             x_start=image_start, x_t=image_t, t=t
+    #         )[0],
+    #         ModelMeanType.START_X: image_start,
+    #         ModelMeanType.EPSILON: noise["image"],
+    #     }[self.model_mean_type]
+    #
+    #     tabular_target = {
+    #         ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+    #             x_start=tabular_start, x_t=tabular_t, t=t
+    #         )[0],
+    #         ModelMeanType.START_X: tabular_start,
+    #         ModelMeanType.EPSILON: noise["tabular"],
+    #     }[self.model_mean_type]
+    #
+    #     # mean_flat(...) => shape [N]
+    #     # If we want a single scalar, we'll do .mean() when we sum below
+    #     image_loss["mse"] = mean_flat((image_target - image_pred) ** 2)
+    #     tabular_loss["mse"] = mean_flat((tabular_target - tabular_pred) ** 2)
+    #
+    #     # 6) Build final output dict
+    #     out = {"loss": 0.0}
+    #     # We loop over keys in image_loss: typically ["mse"] or ["mse","vb"]
+    #     for key in image_loss.keys():
+    #         # Store them as scalars by .mean(), or keep them as [N] if you prefer
+    #         im_val = image_loss[key].mean()  # single scalar
+    #         tab_val = tabular_loss[key].mean()  # single scalar
+    #
+    #         # Save them for logging
+    #         out[f"{key}_image"] = im_val
+    #         out[f"{key}_tabular"] = tab_val
+    #
+    #         # Weighted sum into final loss
+    #         if key == "mse":
+    #             # Weighted MSE
+    #             out["loss"] += w_mse_image * im_val + w_mse_tabular * tab_val
+    #         elif key == "vb":
+    #             # Weighted KL
+    #             out["loss"] += w_vb * (im_val + tab_val)
+    #
+    #     return out
+
+    # TODO: FOR DIT
+    def multimodal_training_losses(
+            self,
+            model,
+            x_start,  # dict with {"image": (N, C, H, W), "tabular": (N, feat_dim), ...}
+            t,
+            model_kwargs=None,
+            noise=None
+    ):
         """
-        Compute training losses for a single timestep, supporting:
-          - MSE only or MSE + partial-freeze KL if self.loss_type in [MSE, RESCALED_MSE].
-          - "Full KL" if self.loss_type in [KL, RESCALED_KL].
+        Compute training losses for a single timestep in a multi-modal scenario:
+          - image (N, C, H, W)
+          - tabular (N, feat_dim)
+        Accepts a MultiModalDiT model that returns either a dict
+          { "image_sample", "tabular_sample", "mask" }
+        or, if CFG is used, a tuple (image_out, tab_out).
 
-        The "best practice" approach for stable multimodal training is:
-          - If we have LEARNED variance: do MSE on the mean/noise channels, plus a partial-freeze KL for the variance channels.
-          - If variance is not learned, do pure MSE.
-          - Possibly scale (rescale) the partial KL or the entire sum.
-
-        Args:
-          model: your multimodal diffusion model, outputs (image_out, tabular_out).
-          x_start: dict {"image": [N,...], "tabular": [N,...]} ground-truth data.
-          t: a 1D tensor of timesteps, shape [N].
-          model_kwargs: optional dict for conditioning.
-          noise: optional dict of noise for image/tabular.
-
-        Returns:
-          A dict with "loss" (a scalar Tensor) plus other partial terms for logging.
+        We incorporate partial patch masking logic if 'mask' is present.
         """
+
+        # 1) Setup
+        image_start = x_start['image']  # (N, C, H, W)
+        # tabular_start = x_start['tabular']  # (N, feature_dim)
         if model_kwargs is None:
             model_kwargs = {}
 
-        image_start = x_start["image"]
-        tabular_start = x_start["tabular"]
-
-        # If not provided, create random noise for forward diffusion:
         if noise is None:
             noise = {
                 "image": th.randn_like(image_start),
-                "tabular": th.randn_like(tabular_start),
+                # "tabular": th.randn_like(tabular_start)
             }
 
-        # Forward diffuse x_0 -> x_t
+        # 2) Noisy input at time t
         image_t = self.q_sample(image_start, t, noise=noise["image"])
-        tabular_t = self.q_sample(tabular_start, t, noise=noise["tabular"])
+        # tabular_t = self.q_sample(tabular_start, t, noise=noise["tabular"])
 
-        # --------------------------------------------------------------------------
-        # 1) CASE: self.loss_type in [MSE, RESCALED_MSE] => MSE + optional partial-freeze KL
-        # --------------------------------------------------------------------------
-        if self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            # Forward pass through your model => returns (image_out_all, tabular_out_all)
-            image_out_all, tabular_out_all = model(
-                image_t, tabular_t, self._scale_timesteps(t), **model_kwargs
-            )
+        # 3) Forward pass through the noise prediction model
+        #    (Possibly with CFG if model_kwargs includes `cfg != 1.0`)
+        out = model(
+            image_t,
+            # tabular_t,
+            self._scale_timesteps(t),
+            **model_kwargs
+        )
 
-            image_loss = {}
-            tabular_loss = {}
+        # image_out, tabular_out, mask = out['image_sample'], out['tabular_sample'], out['mask'] # (N, C, H, W), (N, feature_dim)
+        image_out, mask = out['image_sample'], out['mask']
 
-            # Decide if we have learned variance => partial freeze approach
-            if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
-                # Split the model output for each modality: (mean, var)
-                c_img = image_start.shape[1]  # num channels for image
-                c_tab = tabular_start.shape[1]  # num channels for tabular
+        # 5) Compute target for MSE (depends on your model_mean_type)
+        image_target = {
+            ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+                x_start=image_start, x_t=image_t, t=t
+            )[0],
+            ModelMeanType.START_X: image_start,
+            ModelMeanType.EPSILON: noise["image"],  # normal noise
+        }[self.model_mean_type]
 
-                image_mean, image_var = th.split(image_out_all, c_img, dim=1)
-                tabular_mean, tabular_var = th.split(tabular_out_all, c_tab, dim=1)
+        # tabular_target = {
+        #     ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+        #         x_start=tabular_start, x_t=tabular_t, t=t
+        #     )[0],
+        #     ModelMeanType.START_X: tabular_start,
+        #     ModelMeanType.EPSILON: noise["tabular"],  # normal noise
+        # }[self.model_mean_type]
 
-                # PARTIAL FREEZE: pass the mean .detach() to KL, so only variance gets gradient from KL
-                image_frozen = th.cat([image_mean.detach(), image_var], dim=1)
-                tabular_frozen = th.cat([tabular_mean.detach(), tabular_var], dim=1)
-                frozen_dict = {"image": image_frozen, "tabular": tabular_frozen}
+        # 6) MSE Computation
+        mse_image = (image_target - image_out) ** 2  # shape (N, C, H, W)
+        # mse_tab = (tabular_target - tabular_out) ** 2  # shape (N, feature_dim)
 
-                # Setup x_t dict for _vb_terms_bpd
-                x_t_dict = {"image": image_t, "tabular": tabular_t}
+        image_loss = {}
+        tabular_loss = {}
 
-                # Compute partial KL for the variance channels
-                vb_out = self._vb_terms_bpd(
-                    model=lambda *args, r=frozen_dict: [r["image"], r["tabular"]],
-                    x_start=x_start,
-                    x_t=x_t_dict,
-                    t=t,
-                    clip_denoised=False,
-                )["output"]  # shape: {"image":[N], "tabular":[N]}
+        if mask is not None:
+            # (A) Average MSE across channels => shape (N, 1, H, W)
+            mse_per_channel = mse_image.mean(dim=1, keepdim=True)
 
-                # Average (or sum) over batch
-                image_loss["var_kl"] = vb_out["image"].mean()
-                tabular_loss["var_kl"] = vb_out["tabular"].mean()
+            # (B) Pool by patch_size to get one scalar per patch token
+            #     Make sure patch_size here matches what your model used for patch embedding
+            #     For instance, if model.patch_size=2, do kernel_size=2
+            pooled_mse = F.avg_pool2d(mse_per_channel, kernel_size=model.model.patch_size)
 
-                # This is the "mean" part for MSE training:
-                image_pred = image_mean
-                tabular_pred = tabular_mean
+            # (C) Flatten => shape (N, T)
+            pooled_mse = pooled_mse.view(pooled_mse.shape[0], -1)
 
-                # (Optional) let you scale the KL if you want:
-                # e.g. kl_coef = some hyperparameter
-                # kl_coef = 1.0  # or another self. param
-                # image_loss["var_kl"] *= kl_coef
-                # tabular_loss["var_kl"] *= kl_coef
+            # (D) Multiply by "unmask" and sum / unmask
+            unmask = 1.0 - mask  # shape (N, T)
+            # sum over patches
+            partial_sum = (pooled_mse * unmask).sum(dim=1)
+            denom = unmask.sum(dim=1).clamp_min(1e-8)
+            partial_mse = partial_sum / denom  # shape (N,)
 
-            else:
-                # If variance is not learned, do a pure MSE approach with no partial freeze
-                image_pred = image_out_all
-                tabular_pred = tabular_out_all
-
-            # MSE training for the mean/noise channels
-            # 1) Identify the MSE target for image
-            image_target = {
-                ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
-                    x_start=image_start, x_t=image_t, t=t
-                )[0],
-                ModelMeanType.START_X: image_start,
-                ModelMeanType.EPSILON: noise["image"],
-            }[self.model_mean_type]
-
-            # 2) Identify the MSE target for tabular
-            tabular_target = {
-                ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
-                    x_start=tabular_start, x_t=tabular_t, t=t
-                )[0],
-                ModelMeanType.START_X: tabular_start,
-                ModelMeanType.EPSILON: noise["tabular"],
-            }[self.model_mean_type]
-
-            # 3) Compute MSE
-            image_loss["mse"] = mean_flat((image_target - image_pred) ** 2).mean()
-            tabular_loss["mse"] = mean_flat((tabular_target - tabular_pred) ** 2).mean()
-
-            # Combine final loss
-            total_loss = th.tensor(0.0, device=image_start.device)
-            for key in image_loss.keys():
-                total_loss += image_loss[key] + tabular_loss[key]
-
-            # If "RESCALED_MSE", scale the entire sum or partial vb terms
-            if self.loss_type == LossType.RESCALED_MSE:
-                # e.g. scale_factor = self.num_timesteps / 1000.0
-                scale_factor = self.num_timesteps / 1000.0
-                total_loss *= scale_factor
-
-            # Package results for logging
-            out = {"loss": total_loss}
-            for key in image_loss.keys():
-                out[f"{key}_image"] = image_loss[key]
-                out[f"{key}_tabular"] = tabular_loss[key]
-
-            return out
-
-        # --------------------------------------------------------------------------
-        # 2) CASE: self.loss_type in [KL, RESCALED_KL] => "full kl" approach
-        # --------------------------------------------------------------------------
-        elif self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:
-            """
-            A purely distribution-based approach, letting the KL update both mean
-            and variance channels. No MSE at all.
-
-            Often leads to worse stability or results, but we leave it here
-            if you want a 'full variational' approach. 
-            """
-            image_out_all, tabular_out_all = model(
-                image_t, tabular_t, self._scale_timesteps(t), **model_kwargs
-            )
-
-            # No freeze => pass them as-is to vb
-            full_out = {"image": image_out_all, "tabular": tabular_out_all}
-            x_t_dict = {"image": image_t, "tabular": tabular_t}
-
-            vb_data = self._vb_terms_bpd(
-                model=lambda *args, r=full_out: [r["image"], r["tabular"]],
-                x_start=x_start,
-                x_t=x_t_dict,
-                t=t,
-                clip_denoised=False
-            )["output"]
-
-            kl_image = vb_data["image"].mean()
-            kl_tabular = vb_data["tabular"].mean()
-            total_kl = kl_image + kl_tabular
-
-            if self.loss_type == LossType.RESCALED_KL:
-                total_kl *= (self.num_timesteps / 1000.0)
-
-            return {
-                "loss": total_kl,
-                "kl_image": kl_image,
-                "kl_tabular": kl_tabular
-            }
-
+            # (E) Average over batch
+            mse_image_final = partial_mse.mean(dim=0)
         else:
-            raise NotImplementedError(f"Unknown loss_type: {self.loss_type}")
+            # full MSE
+            mse_image_final = mean_flat(mse_image)  # your "mean_flat" or .mean()
+
+        # mse_tab_final = mean_flat(mse_tab)
+
+        # store
+        image_loss["mse"] = mse_image_final
+        # tabular_loss["mse"] = mse_tab_final
+
+        # 7) Combine into final
+        term = {"loss": 0.0}
+        # For each key in image_loss, add it to total
+        for key in image_loss.keys():
+            term[f"{key}_image"] = image_loss[key]
+            # term[f"{key}_tabular"] = tabular_loss[key]
+            # term["loss"] += (image_loss[key] + tabular_loss[key])
+            term["loss"] += (image_loss[key])
+
+        return term
+
+    # TODO: LAST VALID LOSS
+    # def multimodal_training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+    #     """
+    #     Compute training losses for a single timestep.
+    #
+    #     :param model: the model to evaluate loss on.
+    #     :param x_start: the [N x C x ...] tensor of inputs.
+    #     :param t: a batch of timestep indices.
+    #     :param model_kwargs: if not None, a dict of extra keyword arguments to
+    #         pass to the model. This can be used for conditioning.
+    #     :param noise: if specified, the specific Gaussian noise to try to remove.
+    #     :return: a dict with the key "loss" containing a tensor of shape [N].
+    #              Some mean or variance settings may also have other keys.
+    #     """
+    #     image_start = x_start['image']
+    #     tabular_start = x_start['tabular']
+    #     if model_kwargs is None:
+    #         model_kwargs = {}
+    #
+    #     if noise is None:
+    #         noise = {"image": th.randn_like(image_start), "tabular": th.randn_like(tabular_start)}
+    #
+    #     # 0 means t_th step, 1 means the audio gives groundtruth, 2 means the video gives the groundtruth
+    #     # condition_index = x_start["condition"]
+    #     image_t = self.q_sample(image_start, t, noise=noise["image"])
+    #     tabular_t = self.q_sample(tabular_start, t, noise=noise["tabular"])
+    #
+    #     image_output, tabular_output = model(image_t, tabular_t, self._scale_timesteps(t), **model_kwargs)
+    #
+    #     image_loss = {}
+    #     tabular_loss = {}
+    #     if self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
+    #
+    #         if self.model_var_type in [
+    #             ModelVarType.LEARNED,
+    #             ModelVarType.LEARNED_RANGE,
+    #         ]:
+    #             # Split (mean, var) along dim=1
+    #             image_output, image_var_values = th.split(image_output, image_start.shape[1], dim=1)
+    #             tabular_output, tabular_var_values = th.split(tabular_output, tabular_start.shape[1], dim=1)
+    #
+    #             # Learn the variance using the variational bound, but don't let
+    #             # it affect our mean prediction.
+    #             image_frozen_out = th.cat([image_output.detach(), image_var_values], dim=2)
+    #             tabular_frozen_out = th.cat([tabular_output.detach(), tabular_var_values], dim=1)
+    #             frozen_out = {"image": image_frozen_out, "tabular": tabular_frozen_out}
+    #             x_t = {"image": image_t, "tabular": tabular_t}
+    #             vb_loss = self._vb_terms_bpd(
+    #                 model=lambda *args, r=frozen_out: [r["image"], r["tabular"]],
+    #                 x_start=x_start,
+    #                 x_t=x_t,
+    #                 t=t,
+    #                 clip_denoised=False,
+    #             )["output"]
+    #             image_loss["vb"] = vb_loss["image"]
+    #             tabular_loss["vb"] = vb_loss["tabular"]
+    #             if self.loss_type == LossType.RESCALED_MSE:
+    #                 # Divide by 1000 for equivalence with initial implementation.
+    #                 # Without a factor of 1/1000, the VB term hurts the MSE term.
+    #                 image_loss["vb"] *= self.num_timesteps / 1000.0
+    #                 tabular_loss["vb"] *= self.num_timesteps / 1000.0
+    #
+    #         image_target = {
+    #             ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+    #                 x_start=image_start, x_t=image_t, t=t
+    #             )[0],
+    #             ModelMeanType.START_X: image_start,
+    #             ModelMeanType.EPSILON: noise["image"],  # noise
+    #         }[self.model_mean_type]
+    #         tabular_target = {
+    #             ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+    #                 x_start=tabular_start, x_t=tabular_t, t=t
+    #             )[0],
+    #             ModelMeanType.START_X: tabular_start,
+    #             ModelMeanType.EPSILON: noise["tabular"],  # noise
+    #         }[self.model_mean_type]
+    #
+    #         image_loss["mse"] = mean_flat((image_target - image_output) ** 2)
+    #         tabular_loss["mse"] = mean_flat((tabular_target - tabular_output) ** 2)
+    #
+    #     term = {"loss": 0}
+    #
+    #     for key in image_loss.keys():
+    #         term[f"{key}_image"] = image_loss[key]
+    #         term[f"{key}_tabular"] = tabular_loss[key]
+    #         # term[f"{key}_all"] = video_mask * video_loss[key] + tabular_mask * tabular_loss[key]
+    #         term["loss"] += term[f"{key}_image"] + term[f"{key}_image"]
+    #
+    #     return term
+
+    # TODO: FOR SINGLE MODALITY
+    # def multimodal_training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+    #     """
+    #     Compute training losses for a single timestep.
+    #
+    #     :param model: the model to evaluate loss on.
+    #     :param x_start: the [N x C x ...] tensor of inputs.
+    #     :param t: a batch of timestep indices.
+    #     :param model_kwargs: if not None, a dict of extra keyword arguments to
+    #         pass to the model. This can be used for conditioning.
+    #     :param noise: if specified, the specific Gaussian noise to try to remove.
+    #     :return: a dict with the key "loss" containing a tensor of shape [N].
+    #              Some mean or variance settings may also have other keys.
+    #     """
+    #     image_start = x_start['image']
+    #     tabular_start = x_start['tabular']
+    #     if model_kwargs is None:
+    #         model_kwargs = {}
+    #
+    #     if noise is None:
+    #         noise = {"image": th.randn_like(image_start), "tabular": th.randn_like(tabular_start)}
+    #
+    #     # 0 means t_th step, 1 means the audio gives groundtruth, 2 means the video gives the groundtruth
+    #     # condition_index = x_start["condition"]
+    #     image_t = self.q_sample(image_start, t, noise=noise["image"])
+    #     tabular_t = self.q_sample(tabular_start, t, noise=noise["tabular"])
+    #
+    #     image_output = model(image_t, self._scale_timesteps(t), **model_kwargs)
+    #     tabular_output = th.randn_like(tabular_start)
+    #
+    #     image_loss = {}
+    #     tabular_loss = {}
+    #     if self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
+    #
+    #         if self.model_var_type in [
+    #             ModelVarType.LEARNED,
+    #             ModelVarType.LEARNED_RANGE,
+    #         ]:
+    #             # Split (mean, var) along dim=1
+    #             image_output, image_var_values = th.split(image_output, image_start.shape[1], dim=1)
+    #             tabular_output, tabular_var_values = th.split(tabular_output, tabular_start.shape[1], dim=1)
+    #
+    #             # Learn the variance using the variational bound, but don't let
+    #             # it affect our mean prediction.
+    #             image_frozen_out = th.cat([image_output.detach(), image_var_values], dim=2)
+    #             tabular_frozen_out = th.cat([tabular_output.detach(), tabular_var_values], dim=1)
+    #             frozen_out = {"image": image_frozen_out, "tabular": tabular_frozen_out}
+    #             x_t = {"image": image_t, "tabular": tabular_t}
+    #             vb_loss = self._vb_terms_bpd(
+    #                 model=lambda *args, r=frozen_out: [r["image"], r["tabular"]],
+    #                 x_start=x_start,
+    #                 x_t=x_t,
+    #                 t=t,
+    #                 clip_denoised=False,
+    #             )["output"]
+    #             image_loss["vb"] = vb_loss["image"]
+    #             tabular_loss["vb"] = vb_loss["tabular"]
+    #             if self.loss_type == LossType.RESCALED_MSE:
+    #                 # Divide by 1000 for equivalence with initial implementation.
+    #                 # Without a factor of 1/1000, the VB term hurts the MSE term.
+    #                 image_loss["vb"] *= self.num_timesteps / 1000.0
+    #                 tabular_loss["vb"] *= self.num_timesteps / 1000.0
+    #
+    #         image_target = {
+    #             ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+    #                 x_start=image_start, x_t=image_t, t=t
+    #             )[0],
+    #             ModelMeanType.START_X: image_start,
+    #             ModelMeanType.EPSILON: noise["image"],  # noise
+    #         }[self.model_mean_type]
+    #         tabular_target = {
+    #             ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+    #                 x_start=tabular_start, x_t=tabular_t, t=t
+    #             )[0],
+    #             ModelMeanType.START_X: tabular_start,
+    #             ModelMeanType.EPSILON: noise["tabular"],  # noise
+    #         }[self.model_mean_type]
+    #
+    #         image_loss["mse"] = mean_flat((image_target - image_output) ** 2)
+    #         tabular_loss["mse"] = mean_flat((tabular_target - tabular_output) ** 2)
+    #
+    #     term = {"loss": 0}
+    #
+    #     for key in image_loss.keys():
+    #         term[f"{key}_image"] = image_loss[key]
+    #         # term[f"{key}_tabular"] = tabular_loss[key]
+    #         # term[f"{key}_all"] = video_mask * video_loss[key] + tabular_mask * tabular_loss[key]
+    #         term["loss"] += term[f"{key}_image"] + term[f"{key}_image"]
+    #
+    #     return term
 
     def _prior_bpd(self, x_start):
         """

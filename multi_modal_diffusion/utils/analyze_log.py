@@ -3,6 +3,7 @@ import pandas as pd
 import os
 from collections import defaultdict
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 def parse_and_merge_hook(rows):
     """
@@ -26,7 +27,7 @@ def parse_and_merge_hook(rows):
         row = row.strip()
         match = re.match(pattern, row)
         if match:
-            key = ".".join(match.group(1).strip().split(".")[:-1])
+            key = ".".join(match.group(1).strip().split(".")[:-1]).split(" ")[-1]
             min_val, max_val, mean_val = map(float, match.groups()[1:])
             aggregated_data[key][0] += min_val
             aggregated_data[key][1] += max_val
@@ -176,7 +177,12 @@ def parse_epoch_log(log_lines):
 if __name__ == "__main__":
 
     log_folder_path = "/mnt/storage/nacc_sub/tmp"
-    for epoch_folder in os.listdir(log_folder_path):
+
+    epochs_data = []
+    for epoch_number, epoch_folder in enumerate(
+            (folder for folder in os.listdir(log_folder_path) if
+             Path(log_folder_path, folder).is_dir() and "epoch" in folder), start=1):
+
         epoch_folder_path = Path(log_folder_path, epoch_folder)
         # e.g. suppose each epoch_folder has exactly one ".log" file
         log_files = [f for f in os.listdir(epoch_folder_path) if f.endswith(".log")]
@@ -188,21 +194,70 @@ if __name__ == "__main__":
             log_lines = f.readlines()
 
         parsed_records, hooks_by_iter = parse_epoch_log(log_lines)
+        pd.DataFrame(parsed_records).to_excel(Path(log_folder_path, epoch_folder, "parsed_layers_tensors.xlsx"), index=False)
 
-        # Now you can turn parsed_records into a DataFrame if you wish:
-        df = pd.DataFrame(parsed_records)
-        print(f"Epoch folder: {epoch_folder}")
-        print(f"Shape Stats DataFrame:\n{df.head()}")
+        gradients_in_epoch = {
+            key: [
+                sum(values) / len(values) for values in zip(*[sub[key] for sub in hooks_by_iter.values()])
+            ] for key in next(iter(hooks_by_iter.values()))
+        }
+        epochs_data.append((epoch_number, gradients_in_epoch))
 
-        # hooks_by_iter is a dict mapping iteration -> { param_name: [avg_min, avg_max, avg_mean] }
-        for it, data_dict in hooks_by_iter.items():
-            print(f"\nIteration {it} gradient stats from parse_and_merge_hook():")
-            for param_name, (mn, mx, me) in data_dict.items():
-                print(f"  {param_name}: min={mn:.5f}, max={mx:.5f}, mean={me:.5f}")
+    # Sort epochs_data by the epoch_number just in case the folder listing is out of order
+    epochs_data.sort(key=lambda x: x[0])
 
-        print("-" * 60)
+    # Collect data for plotting
+    param_names = list(epochs_data[0][1].keys())
+    metrics = ["avg_min", "avg_max", "avg_mean"]
+    epochs = [epoch_data[0] for epoch_data in epochs_data]
 
+    data_by_metric = {metric: {param: [] for param in param_names} for metric in metrics}
 
+    for epoch_number, gradients in epochs_data:
+        for param_name, values in gradients.items():
+            for idx, metric in enumerate(metrics):
+                data_by_metric[metric][param_name].append(values[idx])
+
+    # ------------------------------------------------------------
+    # Create a folder for saving plots
+    # ------------------------------------------------------------
+
+    output_plots_path = Path(log_folder_path, "plots")
+    output_plots_path.mkdir(exist_ok=True, parents=True)
+
+    # Plot each metric, but use a log scale on the y-axis
+    for metric, params_data in data_by_metric.items():
+        plt.figure(figsize=(24, 16))
+        for param_name, values in params_data.items():
+            plt.plot(epochs, values, label=param_name)
+
+        plt.title(f"Gradient {metric} Across Epochs", fontsize=14)
+        plt.xlabel("Epoch", fontsize=12)
+        plt.ylabel(f"{metric}", fontsize=12)
+        plt.xticks(fontsize=10)
+        plt.yticks(fontsize=10)
+        plt.legend(fontsize=8, title="Param Names", title_fontsize=10)
+        plt.tight_layout()
+        plt.grid(True)
+
+        # --------------------------
+        # Make y-axis logarithmic
+        # --------------------------
+        plt.yscale("log")
+
+        # Optional: set y-limits to focus on small gradients (tweak as needed)
+        # For example, show from 1e-8 up to 1e-2:
+        if metric == "avg_max":
+            plt.ylim(1e-6, 1e-1)
+        elif metric == "avg_min":
+            # plt.ylim(-1e-9, -1e-3)
+            ...
+        elif metric == "avg_mean":
+            plt.ylim(1e-12, 1e-5)
+
+        # Save the plot
+        plt.savefig(Path(output_plots_path, f"gradients_{metric}_png"))
+        plt.close()
 
     # df = pd.DataFrame(parsed)
     #

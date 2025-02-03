@@ -6,5 +6,5 @@ if __name__ == "__main__":
     parser = create_argparser()
     args = parser.parse_args()
 
-    pipeline = Pipeline(steps=[BaseTrainingStep(num_epochs=30)])
+    pipeline = Pipeline(steps=[BaseTrainingStep(num_epochs=200)])
     pipeline.run(args)

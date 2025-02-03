@@ -77,7 +77,6 @@ def normalization(channels):
     """
     return GroupNorm32(32, channels)
 
-
 def zero_module(module):
     """
     Zero out the parameters of a module and return it.

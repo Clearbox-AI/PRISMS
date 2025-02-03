@@ -58,16 +58,16 @@ def load_training_data(args):
         dataset = LDMOneHDataset(
             data_dir=args.data_dir,
             image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') else (64, 64),
-            modality=args.modality if hasattr(args, 'modality') else "tabular"
+            # modality=args.modality if hasattr(args, 'modality') else "tabular"
+            modality=args.modality if hasattr(args, 'modality') else "image"
         )
     else:
         raise ValueError(f"Unsupported dataset type: {args.dataset_type}")
 
-    sampler = DistributedSampler(dataset) if dist_util.get_world_size() > 1 else None
+    sampler = DistributedSampler(dataset, shuffle=False, drop_last=True) if dist_util.get_world_size() > 1 else None
     data_loader = th.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=(sampler is None),
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
@@ -79,7 +79,8 @@ def load_training_data(args):
 class ImageTabularDataset(Dataset):
     def __init__(self, data_dir, image_size=(256, 256)):
         self.data_dir = data_dir
-        self.image_size = image_size  # Desired image size (width, height)
+        self.image_size = (64,64)
+        # self.image_size = image_size  # Desired image size (width, height)
         # Get list of patient directories
         self.patient_dirs = [
             os.path.join(data_dir, d) for d in os.listdir(data_dir)
@@ -205,27 +206,6 @@ class ImageTabularDataset(Dataset):
     def compute_tabular_normalization(self):
 
         # Collect all tabular data
-        # all_tabular_data = []
-        # for patient_dir in self.patient_dirs:
-        #     json_files = glob(os.path.join(patient_dir, '*.json'))
-        #     if not json_files:
-        #         continue
-        #     json_path = json_files[0]
-        #     with open(json_path, 'r') as f:
-        #         json_data = json.load(f)
-        #     tabular_data = json_data.get('patient_id', list(json_data.values())[0])
-        #     if not tabular_data:
-        #         continue
-        #     all_tabular_data.append(tabular_data)
-        # if not all_tabular_data:
-        #     raise ValueError("No tabular data found in any patient directories.")
-        # all_tabular_data = np.array(all_tabular_data, dtype=np.float32)
-        # mean = np.mean(all_tabular_data, axis=0)
-        # std = np.std(all_tabular_data, axis=0)
-        # std[std == 0] = 1.0  # Prevent division by zero
-        # return mean, std
-
-        # Collect all tabular data
         all_tabular_data = []
         for patient_dir in self.patient_dirs:
             json_files = glob(os.path.join(patient_dir, '*.json'))
@@ -280,47 +260,56 @@ class ImageTabularDataset(Dataset):
 
 class NaccLatentsDataset(Dataset):
     """
-    A dataset class for latents shaped [1, 4, H, W] that need to be resized
-    to a square for a UNet, while only normalizing tabular (JSON) data.
+    A dataset for latents (shape [1, 4, H, W]) which we resize to a square
+    and normalize to [-1, 1]. We also load optional JSON tabular data
+    and scale it to [-1, 1] as well.
 
-    Steps:
-      1) Load .npy file with shape [1, 4, H, W].
+    Steps for latents:
+      1) Load .npy of shape [1, 4, H, W].
       2) Remove the first dimension -> [4, H, W].
-      3) Move channels to the end -> [H, W, 4] to use PIL for resizing.
-      4) Resize to a fixed square (e.g. 64x64).
-      5) Move channels back to front -> [4, 64, 64].
-      6) Return as a torch tensor without normalizing the latents.
-      7) Load JSON data and apply StandardScaler for tabular fields.
+      3) (Optional) Resize to a fixed square (e.g. 64x64).
+      4) Normalize latents to [-1, 1] using a global min/max across the dataset.
+      5) Return latents as a torch float32 tensor of shape [4, outH, outW].
+
+    Steps for tabular:
+      1) Load JSON data if it exists.
+      2) Collect all tabular data across dataset, compute global min/max per feature.
+      3) Transform each feature into [-1, 1].
+      4) Return as torch float32 tensor.
     """
+
     def __init__(self, data_dir, image_size=(64, 64)):
         """
         Args:
-            data_dir (str): Root directory containing subfolders, each with one .npy (latents) and an optional .json.
-            image_size (tuple): (H, W) shape to which we resize the latents.
+            data_dir (str): Root directory containing subfolders, each with .npy (latents) and possibly .json (tabular).
+            image_size (tuple): (H, W) to resize the latents.
         """
         self.data_dir = data_dir
-        self.out_size = image_size  # e.g. (64, 64)
+        self.image_size = image_size
 
         # List of patient directories
         self.patient_dirs = [
-            os.path.join(data_dir, d) for d in os.listdir(data_dir)
+            os.path.join(data_dir, d)
+            for d in os.listdir(data_dir)
             if os.path.isdir(os.path.join(data_dir, d))
         ]
         if not self.patient_dirs:
             raise ValueError(f"No patient directories found in {data_dir}")
 
-        # StandardScaler for tabular data
+        # Create a MinMaxScaler to scale tabular features into [-1, 1]
         self.tabular_scaler = StandardScaler()
 
-        # Attributes to store global min/max of latents
-        self.global_latent_min = float('inf')
-        self.global_latent_max = float('-inf')
-
-        # Fit the scaler on any tabular data in the dataset
+        # Fit the tabular scaler on all data (so each sample is scaled consistently)
         self.compute_tabular_normalization()
 
-        # Compute global min/max for latents across the dataset
-        self.compute_latent_minmax()
+        # Min–max scalers for latents and tabular
+        self.latent_min = float('inf')
+        self.latent_max = float('-inf')
+        # self.tabular_scaler = MinMaxScalerNeg1to1()
+
+        # Pre-fit the scalers
+        # self._compute_tabular_minmax()
+        self._compute_latent_minmax()
 
     def __len__(self):
         return len(self.patient_dirs)
@@ -328,48 +317,66 @@ class NaccLatentsDataset(Dataset):
     def __getitem__(self, idx):
         """
         Returns a dict with:
-          - 'latents': shape [4, image_size[0], image_size[1]] as a torch.Tensor (float32)
-          - 'tabular': shape [N] as a torch.Tensor (float32), if JSON data is found
+          - 'image': shape [4, H, W] as a torch.Tensor (float32)
+          - 'tabular': shape [N] as a torch.Tensor (float32), if found
         """
         patient_dir = self.patient_dirs[idx]
 
-        # 1) Load latents, shape [1, 4, H, W]
+        # 1) Load latents => shape [1, 4, H, W]
         latents_path = self._find_npy_file(patient_dir)
-        latents_np = np.load(latents_path)
+        latents_np = np.load(latents_path)  # shape [1, 4, H, W]
         if latents_np.shape[0] != 1 or latents_np.shape[1] != 4:
-            raise ValueError(
-                f"Expected latents shape [1, 4, H, W], got {latents_np.shape} in {latents_path}"
-            )
+            raise ValueError(f"Expected latents shape [1, 4, H, W], got {latents_np.shape}")
 
-        # Remove first dimension -> [4, H, W]
-        latents_np = latents_np[0]  # now shape: [4, H, W]
+        # Drop first dimension => [4, H, W]
+        latents_np = latents_np[0]
 
-        # TODO: TRY THIS
-        # latents_np = np.repeat(latents_np[:1], 3, axis=0)
+        # 2) Resize latents (uncomment if you do want resizing)
+        # latents_np = self._resize_latents(latents_np)  # => [4, outH, outW]
 
+        # 3) Normalize latents to [-1, 1]
+        latents_np = self._minmax_normalize_latents(latents_np)
 
-        # 2) Resize latents to image_size (H,W), while preserving channels = 4
-        # latents_np = self._resize_latents(latents_np)  # shape => [4, image_size[0], image_size[1]]
-
-        # Normalize latents to [-1, 1] using the global min/max
-        latents_np = self._normalize_latents(latents_np)
-
-        # Convert latents to torch tensor
+        # 4) Convert latents to torch tensor
         latents_torch = torch.from_numpy(latents_np.astype(np.float32))
 
-        # 3) Load & scale tabular data from JSON
-        tabular_data = self._load_tabular_data(patient_dir)
+        # 5) Load tabular data and scale to [-1, 1]
+        # tabular_data = self._load_tabular_data(patient_dir)
+
+        # TABULAR PART
+        # Find JSON file
+        json_files = glob(os.path.join(patient_dir, '*.json'))
+        if not json_files:
+            raise FileNotFoundError(f"No JSON files found in {patient_dir}")
+        json_path = json_files[0]  # Use the first .json file found
+        with open(json_path, 'r') as f:
+            json_data = json.load(f)
+
+        # Get the tabular data
+        # Try 'patient_id' key; if not present, use the first value
+        tabular_data = json_data.get('patient_id', list(json_data.values())[0])
+        if not tabular_data:
+            raise ValueError(f"No tabular data found in {json_path}")
+        # tabular_data = np.array(tabular_data, dtype=np.float32)
+        tabular_data = np.array(tabular_data, dtype=np.float32).reshape(1, -1)
+
+        # Normalize tabular data
+        # tabular_data = (tabular_data - self.tabular_mean) / self.tabular_std
+        tabular_data = self.tabular_scaler.transform(tabular_data).flatten()
+
+        # Convert tabular data to torch tensor
+        tabular_data = th.from_numpy(tabular_data)
 
         return {
-            'image': latents_torch,  # [4, image_size[0], image_size[1]]
-            'tabular': tabular_data    # e.g. shape [N], or empty if none found
+            'image': latents_torch,  # [4, outH, outW]
+            'tabular': tabular_data  # [N] or empty
         }
 
     def _find_npy_file(self, patient_dir):
-        """Find the .npy file in a patient directory."""
+        """Return the first .npy file found in a patient directory."""
         latents_files = glob(os.path.join(patient_dir, '*.npy'))
         if not latents_files:
-            raise FileNotFoundError(f"No .npy files found in {patient_dir}")
+            raise FileNotFoundError(f"No .npy file found in {patient_dir}")
         return latents_files[0]
 
     def _resize_latents(self, latents: np.ndarray) -> np.ndarray:
@@ -400,110 +407,160 @@ class NaccLatentsDataset(Dataset):
         latents_resized = np.transpose(latents_resized_ch_last, (2, 0, 1))
         return latents_resized
 
-    def _load_tabular_data(self, patient_dir: str) -> torch.Tensor:
-        """Load JSON data, scale it with StandardScaler, and return as torch.Tensor."""
-        json_files = glob(os.path.join(patient_dir, '*.json'))
-        if not json_files:
-            # No JSON => return empty tensor
-            return torch.empty(0, dtype=torch.float32)
+    def _compute_latent_minmax(self):
+        """
+        One pass to find the global min and max across all latents,
+        so we can scale them consistently to [-1, 1].
+        """
+        for patient_dir in self.patient_dirs:
+            latents_path = self._find_npy_file(patient_dir)
+            arr = np.load(latents_path)  # [1, 4, H, W]
+            arr = arr[0]  # [4, H, W]
 
-        json_path = json_files[0]
-        with open(json_path, 'r') as f:
-            json_data = json.load(f)
+            curr_min = arr.min()
+            curr_max = arr.max()
+            if curr_min < self.latent_min:
+                self.latent_min = curr_min
+            if curr_max > self.latent_max:
+                self.latent_max = curr_max
 
-        # Example extraction: either 'patient_id' or the first value
-        tabular_vals = json_data.get('patient_id', list(json_data.values())[0])
-        if not isinstance(tabular_vals, (list, tuple)):
-            # If there's no numeric data, return empty
-            return torch.empty(0, dtype=torch.float32)
+        # Avoid divide-by-zero if min == max
+        if self.latent_min == self.latent_max:
+            self.latent_min -= 1e-6
+            self.latent_max += 1e-6
 
-        tabular_np = np.array(tabular_vals, dtype=np.float32).reshape(1, -1)
-        tabular_scaled = self.tabular_scaler.transform(tabular_np).flatten()
-        return torch.from_numpy(tabular_scaled)
+    def _minmax_normalize_latents(self, latents: np.ndarray) -> np.ndarray:
+        """
+        Scale latents from [4, H, W] into [-1, 1] using global min/max.
+        """
+        return 2.0 * (latents - self.latent_min) / (self.latent_max - self.latent_min) - 1.0
 
     def compute_tabular_normalization(self):
-        """
-        Go through each patient directory, gather all tabular arrays, and
-        fit the StandardScaler.
-        """
-        all_tabular = []
+        # """
+        # Go through each patient directory, gather all tabular arrays, and
+        # fit the StandardScaler.
+        # """
+        # all_tabular = []
+        # for patient_dir in self.patient_dirs:
+        #     json_files = glob(os.path.join(patient_dir, '*.json'))
+        #     if not json_files:
+        #         continue
+        #     with open(json_files[0], 'r') as f:
+        #         json_data = json.load(f)
+        #     vals = json_data.get('patient_id', list(json_data.values())[0])
+        #     vals = [0 if x >= 9000 else x for x in vals]
+        #     if isinstance(vals, (list, tuple)):
+        #         all_tabular.append(vals)
+        #
+        # if not all_tabular:
+        #     # No tabular data found, fit on dummy to avoid errors
+        #     self.tabular_scaler.fit([[0.0]])
+        #     return
+        #
+        # all_tabular_np = np.array(all_tabular, dtype=np.float32)
+        # self.tabular_scaler.fit(all_tabular_np)
+
+        # Collect all tabular data
+        all_tabular_data = []
         for patient_dir in self.patient_dirs:
             json_files = glob(os.path.join(patient_dir, '*.json'))
             if not json_files:
                 continue
-            with open(json_files[0], 'r') as f:
+            json_path = json_files[0]
+            with open(json_path, 'r') as f:
                 json_data = json.load(f)
-            vals = json_data.get('patient_id', list(json_data.values())[0])
-            if isinstance(vals, (list, tuple)):
-                all_tabular.append(vals)
+            tabular_data = json_data.get('patient_id', list(json_data.values())[0])
+            if not tabular_data:
+                continue
+            all_tabular_data.append(tabular_data)
+        if not all_tabular_data:
+            raise ValueError("No tabular data found in any patient directories.")
+        all_tabular_data = np.array(all_tabular_data, dtype=np.float32)
 
-        if not all_tabular:
-            # No tabular data found, fit on dummy to avoid errors
-            self.tabular_scaler.fit([[0.0]])
-            return
+        # Fit the StandardScaler on the collected tabular data
+        self.tabular_scaler.fit(all_tabular_data)
 
-        all_tabular_np = np.array(all_tabular, dtype=np.float32)
-        self.tabular_scaler.fit(all_tabular_np)
 
-    def compute_latent_minmax(self):
+    def _get_tabular_values(self, patient_dir):
+        """Helper to load numeric tabular data as a list/1D array, or None if missing."""
+        json_files = glob(os.path.join(patient_dir, '*.json'))
+        if not json_files:
+            return None
+        with open(json_files[0], 'r') as f:
+            data = json.load(f)
+
+        # Suppose your numeric data is in data['patient_id'], or just the first values
+        vals = data.get('patient_id', list(data.values())[0])
+        vals = [0 if x >= 9000 else x for x in vals]
+
+        # Must be a list/tuple of numbers
+        if isinstance(vals, (list, tuple)):
+            return vals
+        return None
+
+    def _load_tabular_data(self, patient_dir):
         """
-        Make one pass through the dataset to get global min/max.
-        This will let us do a consistent [-1, 1] scaling in __getitem__.
+        Load one row of tabular data and transform it to [-1, 1].
+        Returns a torch.Tensor, shape [num_features].
         """
-        for patient_dir in self.patient_dirs:
-            latents_path = self._find_npy_file(patient_dir)
-            latents_np = np.load(latents_path)  # shape [1, 4, H, W]
-            latents_np = latents_np[0]          # => [4, H, W]
+        row = self._get_tabular_values(patient_dir)
+        if row is None:
+            return torch.empty(0, dtype=torch.float32)
 
-            curr_min = latents_np.min()
-            curr_max = latents_np.max()
-            if curr_min < self.global_latent_min:
-                self.global_latent_min = curr_min
-            if curr_max > self.global_latent_max:
-                self.global_latent_max = curr_max
-
-        # Edge case: if global_min == global_max, avoid divide-by-zero
-        if self.global_latent_min == self.global_latent_max:
-            # Arbitrarily set them to min-1 and min+1, or skip normalization
-            self.global_latent_min -= 1e-6
-            self.global_latent_max += 1e-6
-
-    # # normalize latents array to [-1, 1]
-    def _normalize_latents(self, latents: np.ndarray) -> np.ndarray:
-        """
-        Given latents in shape [4, H, W] and the precomputed global min/max,
-        scale to [-1, 1].
-        """
-        # If you already handled edge case above, this is safe:
-        latents = 2.0 * (latents - self.global_latent_min) \
-                  / (self.global_latent_max - self.global_latent_min) - 1.0
-        return latents
-
-    # normalize latents array to [0, 255]
-    # def _normalize_latents(self, latents: np.ndarray) -> np.ndarray:
-    #     """
-    #     Given latents in shape [4, H, W] and the precomputed global min/max,
-    #     scale to [0, 255].
-    #
-    #     Args:
-    #         latents (np.ndarray): Input latents with shape [4, H, W].
-    #
-    #     Returns:
-    #         np.ndarray: Normalized latents scaled to [0, 255].
-    #     """
-    #     # Compute the range using precomputed global min and max
-    #     range_val = self.global_latent_max - self.global_latent_min
-    #
-    #     if range_val == 0:
-    #         # Avoid division by zero if all values are the same
-    #         normalized_latents = np.zeros_like(latents)
-    #     else:
-    #         # Scale latents to [0, 255]
-    #         normalized_latents = (latents - self.global_latent_min) / range_val * 255.0
-    #
-    #     return normalized_latents
+        row = np.array(row, dtype=np.float32).reshape(1, -1)  # shape [1, n_features]
+        # row_scaled = self.tabular_scaler.transform(row)       # also shape [1, n_features]
+        # return torch.from_numpy(row_scaled.flatten())
+        return torch.from_numpy(row.flatten())
 
 
+class MinMaxScalerNeg1to1:
+    """
+    Min-max scaler that scales each column into [-1, 1].
+    Handles zero-range columns by assigning them to 0.
+    Optionally can convert sentinel values > 9999 to NaN and then impute.
+    """
+    def __init__(self, sentinel_threshold=9999):
+        self.min_ = None
+        self.max_ = None
+        self.sentinel_threshold = sentinel_threshold
+
+    def fit(self, X):
+        # X shape: [n_samples, n_features]
+        # Optionally replace sentinel > 9999 with np.nan
+        if self.sentinel_threshold is not None:
+            X = np.where(X > self.sentinel_threshold, np.nan, X)
+
+        # If columns can have NaN, decide how to handle it (drop or fill)
+        for c in range(X.shape[1]):
+            col = X[:, c]
+            # Fill NaN with column mean (simple imputation)
+            if np.all(np.isnan(col)):
+                # Entire column is missing
+                col[:] = 0  # or drop the column, or keep them as 0
+            else:
+                mean_val = np.nanmean(col)
+                col[np.isnan(col)] = mean_val
+
+        self.min_ = X.min(axis=0)
+        self.max_ = X.max(axis=0)
+
+        # If min == max for a column, that column is constant => nudge them
+        no_range_mask = (self.max_ == self.min_)
+        self.max_[no_range_mask] = self.min_[no_range_mask] + 1e-7
+
+    def transform(self, X):
+        if self.sentinel_threshold is not None:
+            X = np.where(X > self.sentinel_threshold, np.nan, X)
+        # Fill NaN again
+        for c in range(X.shape[1]):
+            col = X[:, c]
+            mean_val = np.nanmean(col)
+            col[np.isnan(col)] = mean_val
+
+        # Perform min–max with the fitted min_/max_
+        denom = (self.max_ - self.min_)
+        scaled = 2.0 * (X - self.min_) / denom - 1.0
+        return scaled
 
 
 
