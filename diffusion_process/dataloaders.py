@@ -18,6 +18,12 @@ import nibabel as nib
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data.distributed import DistributedSampler
 from multi_modal_diffusion import dist_util
+import os
+import torch
+from torch.utils.data import DataLoader, DistributedSampler
+from omegaconf import DictConfig
+from enums.latent_type import LatentType
+import torch.distributed as dist
 
 from diffusion_process.enums import DatasetType
 
@@ -75,55 +81,102 @@ from diffusion_process.enums import DatasetType
 #     )
 #     return data_loader
 
-
-import os
-import torch
-from torch.utils.data import DataLoader, DistributedSampler
-from omegaconf import DictConfig
-from enums.latent_type import LatentType
+# TODO: BEFORE DDP
+# def load_training_data(cfg: DictConfig):
+#     """
+#     Creates a DataLoader for the NACC dataset (or other possible sets)
+#     depending on Hydra config values in cfg.data and cfg.model.
+#     """
+#
+#     dataset_type = cfg.data.dataset_type.lower()
+#
+#     if dataset_type == "nacc":
+#         # Decide final image range based on VAE choice
+#         # e.g. "sd_xl" => we want [-1,1], or "none" => no shift
+#         vae_name = cfg.vae.model_alias
+#         if vae_name == LatentType.SD_XL.value:
+#             final_range = "minus1to1"
+#         else:
+#             final_range = "none"
+#             # or "0to1", depending on your preference
+#
+#         dataset = NaccDataset(
+#             data_dir=cfg.data.data_dir,
+#             image_height=cfg.data.image_height,
+#             image_width=cfg.data.image_width,
+#             domain=cfg.data.domain,  # "mri" or "ct"
+#             do_augment=cfg.data.do_augment,
+#             do_image_normalize=cfg.data.do_image_normalize,
+#             do_tabular_normalize=cfg.data.do_tabular_normalize,
+#             target_channels=cfg.vae.target_channels,
+#             final_image_range=final_range,
+#             debug=cfg.data.debug
+#         )
+#     else:
+#         raise ValueError(f"Unsupported dataset type: {dataset_type}")
+#
+#     sampler = DistributedSampler(dataset, shuffle=False, drop_last=True) if dist_util.get_world_size() > 1 else None
+#     loader = DataLoader(
+#         dataset=dataset,
+#         batch_size=cfg.training.batch_size,
+#         num_workers=cfg.training.num_workers,
+#         pin_memory=True,
+#         drop_last=True,
+#         sampler=sampler
+#     )
+#     return loader
 
 def load_training_data(cfg: DictConfig):
     """
-    Creates a DataLoader for the NACC dataset (or other possible sets)
-    depending on Hydra config values in cfg.data and cfg.model.
+    Create a DataLoader for your dataset.
+    If multiple GPUs are used (DDP), then we use a DistributedSampler.
     """
-
     dataset_type = cfg.data.dataset_type.lower()
 
-    if dataset_type == "nacc":
-        # Decide final image range based on VAE choice
-        # e.g. "sd_xl" => we want [-1,1], or "none" => no shift
-        vae_name = cfg.vae.model_alias
-        if vae_name == LatentType.SD_XL.value:
-            final_range = "minus1to1"
-        else:
-            final_range = "none"
-            # or "0to1", depending on your preference
+    vae_name = cfg.vae.model_alias
+    if vae_name == LatentType.SD_XL.value:
+        final_range = "minus1to1"
+    else:
+        final_range = "none"
+        # or "0to1", depending on your preference
 
+    if dataset_type == "nacc":
         dataset = NaccDataset(
-            data_dir=cfg.data.data_dir,
-            image_height=cfg.data.image_height,
-            image_width=cfg.data.image_width,
-            domain=cfg.data.domain,  # "mri" or "ct"
-            do_augment=cfg.data.do_augment,
-            do_image_normalize=cfg.data.do_image_normalize,
-            do_tabular_normalize=cfg.data.do_tabular_normalize,
-            target_channels=cfg.vae.target_channels,
-            final_image_range=final_range,
-            debug=cfg.data.debug
+                        data_dir=cfg.data.data_dir,
+                        image_height=cfg.data.image_height,
+                        image_width=cfg.data.image_width,
+                        domain=cfg.data.domain,  # "mri" or "ct"
+                        do_augment=cfg.data.do_augment,
+                        do_image_normalize=cfg.data.do_image_normalize,
+                        do_tabular_normalize=cfg.data.do_tabular_normalize,
+                        target_channels=cfg.vae.target_channels,
+                        final_image_range=final_range,
+                        debug=cfg.data.debug
         )
     else:
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
 
+    # Condition for distributed
+    world_size = 1
+    rank = 0
+    if dist.is_available() and dist.is_initialized():
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
 
-    sampler = DistributedSampler(dataset, shuffle=False, drop_last=True) if dist_util.get_world_size() > 1 else None
+    # If we have multiple processes, wrap in DistributedSampler
+    if world_size > 1:
+        sampler = DistributedSampler(dataset, shuffle=True, drop_last=True)
+    else:
+        sampler = None
+
     loader = DataLoader(
         dataset=dataset,
         batch_size=cfg.training.batch_size,
         num_workers=cfg.training.num_workers,
         pin_memory=True,
         drop_last=True,
-        sampler=sampler
+        sampler=sampler,
+        shuffle=(sampler is None)  # only shuffle if not using a distributed sampler
     )
     return loader
 
@@ -201,6 +254,7 @@ class NaccDataset(Dataset):
         self.image_std = 1.0
 
         # Precompute stats if requested
+        # TODO: in distributed setting each rank sees each portion of data, so in future handle this for global mean etc
         if do_tabular_normalize or do_image_normalize:
             self._compute_normalization()
 
@@ -241,7 +295,12 @@ class NaccDataset(Dataset):
 
         # 9) Debug visualization
         if self.debug and not NaccDataset._debug_shown_global:
-            self._debug_show_image(image_tensor)
+            # show only if rank 0
+            rank = 0
+            if dist.is_available() and dist.is_initialized():
+                rank = dist.get_rank()
+            if rank == 0:
+                self._debug_show_image(image_tensor)
             NaccDataset._debug_shown_global = True
 
         # 10) Load tabular

@@ -16,7 +16,6 @@ from diffusion.multimodal_diffusion import MultiModalDiffusion
 from multi_modal_diffusion.model.dit_mm import MultiModalDiT
 from diffusion_process.dataloaders import load_training_data
 
-
 def train_multimodal_diffusion(model, train_loader, cfg: DictConfig):
     """
     Main training loop.

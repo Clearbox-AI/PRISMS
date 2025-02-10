@@ -17,7 +17,7 @@ def ntuple(n: int):
     return parse
 
 
-def create_norm(norm_type: str, dim: int, eps: float = 1e-6) -> nn.Module:
+def  create_norm(norm_type: str, dim: int, eps: float = 1e-6) -> nn.Module:
     """
     Creates a normalization layer of the given type.
     Currently supports only "layernorm" or "np_layernorm".

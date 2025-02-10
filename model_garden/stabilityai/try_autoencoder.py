@@ -5,45 +5,57 @@ from diffusers import AutoencoderKL
 import torch.nn.functional as F
 
 
+# Configuration flag for latent augmentations
+APPLY_LATENT_AUGMENTATIONS = True  # Set to False to disable perturbations
+PERTURBATION_TYPES = ["gaussian_noise", "scaling", "drop_channels"]
+PERTURBATION_STRENGTHS = [0.1, 0.5, 1.0, 2.0, 5.0]  # Perturbation levels
+
+
+def prepare_for_plot(tensor):
+    """Converts a tensor with values in [-1, 1] to an image in [0, 1] format."""
+    image = tensor[0].cpu().clamp(-1, 1)
+    image = (image + 1) / 2.0
+    image = image.permute(1, 2, 0).numpy()
+    return image
+
+
 def pad_to_size(image_tensor: torch.Tensor, target_size: int = 512) -> torch.Tensor:
     """
     Pads a (C, H, W) image tensor to (C, target_size, target_size) with a constant 0 background.
     Preserves the original aspect ratio in the center.
     """
-    # image_tensor shape: [C, H, W]
     _, H, W = image_tensor.shape
-
-    # Amount to pad on each side
     pad_h = max(0, (target_size - H) // 2)
     pad_w = max(0, (target_size - W) // 2)
-
-    # Pad with zeros (background=0); shape becomes [C, target_size, target_size]
-    padded_image = F.pad(image_tensor, (pad_w, pad_w, pad_h, pad_h), mode="constant", value=0.0)
-
-    return padded_image
+    return F.pad(image_tensor, (pad_w, pad_w, pad_h, pad_h), mode="constant", value=0.0)
 
 
 def normalize_for_sd(image_tensor: torch.Tensor) -> torch.Tensor:
     """
     Normalizes an image tensor to the range [-1, 1], handling edge cases.
-    Expects float32 or float64 tensor.
     """
     min_val = image_tensor.min()
     max_val = image_tensor.max()
-
-    # Handle constant or near-constant images to avoid divide-by-zero
-    if torch.isclose(min_val, max_val):
-        # If the slice is constant, just set it to 0.0 => which maps to -1 after the shift.
-        # Or you can choose to keep it at 0.0 entirely.
+    if torch.isclose(min_val, max_val):  # Handle constant images
         print("[Warning] Image is effectively constant. Setting it to zeros.")
         return torch.zeros_like(image_tensor)
+    image_tensor = (image_tensor - min_val) / (max_val - min_val)  # Normalize to [0, 1]
+    return 2.0 * image_tensor - 1.0  # Shift to [-1, 1]
 
-    # First bring to [0, 1]
-    image_tensor = (image_tensor - min_val) / (max_val - min_val)
-    # Then shift to [-1, 1]
-    image_tensor = 2.0 * image_tensor - 1.0
 
-    return image_tensor
+# Perturbation Methods
+def add_gaussian_noise(latent, std_dev):
+    noise = torch.randn_like(latent) * std_dev
+    return latent + noise
+
+
+def scale_latent(latent, alpha):
+    return latent * alpha
+
+
+def drop_latent_channels(latent, drop_prob):
+    mask = torch.bernoulli(torch.full(latent.shape, 1 - drop_prob, device=latent.device))
+    return latent * mask
 
 
 # ---------------------
@@ -52,7 +64,7 @@ def normalize_for_sd(image_tensor: torch.Tensor) -> torch.Tensor:
 vae = AutoencoderKL.from_pretrained(
     "stabilityai/stable-diffusion-xl-base-1.0",
     subfolder="vae",
-    torch_dtype=torch.float32  # using float32 to avoid potential half-precision NaNs
+    torch_dtype=torch.float32
 ).to("cuda")
 
 
@@ -62,37 +74,12 @@ vae = AutoencoderKL.from_pretrained(
 image_path = "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice/sub-NACC022031/sub-NACC022031_T1w_middle_slice.npy"
 image = np.load(image_path)
 
-# Suppose 'image' is 2D. Make it 3-channel by repeating.
-# If your data is already 3D in shape [3, H, W], you can skip this step.
-if image.ndim == 2:
-    # image: [H, W]
-    image = image[None, ...]         # => [1, H, W]
-    image = np.repeat(image, 3, axis=0)  # => [3, H, W]
+if image.ndim == 2:  # If 2D, make it 3-channel
+    image = np.repeat(image[None, ...], 3, axis=0)
 
-# Convert to torch tensor on CUDA, float32
 image_tensor = torch.tensor(image, dtype=torch.float32, device="cuda")
-
-# ---------------------------
-# 3. Pad and normalize for VAE
-# ---------------------------
-image_tensor = pad_to_size(image_tensor, target_size=512)   # => [3, 512, 512]
-image_tensor = normalize_for_sd(image_tensor)               # => range ~[-1, 1]
-image_tensor = image_tensor.unsqueeze(0)                    # => [1, 3, 512, 512]
-
-
-# -----------------------
-# 4. Visualize input image
-# -----------------------
-# For matplotlib, convert back to CPU/numpy in [0,1] range to show as an RGB image
-image_for_plot = (image_tensor[0].clone().cpu() + 1) / 2.0  # bring from [-1,1] to [0,1]
-image_for_plot = image_for_plot.clamp(0, 1).numpy()         # shape [3, 512, 512]
-image_for_plot = image_for_plot.transpose(1, 2, 0)          # shape [512, 512, 3]
-
-plt.figure(figsize=(12, 4))
-plt.subplot(1, 3, 1)
-plt.imshow(image_for_plot)
-plt.title("Original (Padded) Image")
-plt.axis("off")
+image_tensor = pad_to_size(image_tensor, target_size=512)  # [3, 512, 512]
+image_tensor = normalize_for_sd(image_tensor).unsqueeze(0)  # [1, 3, 512, 512]
 
 
 # ---------------------
@@ -100,39 +87,43 @@ plt.axis("off")
 # ---------------------
 with torch.inference_mode():
     latent_dist = vae.encode(image_tensor).latent_dist
-    latent = latent_dist.sample()               # shape [1, latent_channels, H//8, W//8] typically
-    decoded_image = vae.decode(latent).sample # shape [1, 3, 512, 512]
-
-# Bring decoded image to [0,1] for plotting
-decoded_image_for_plot = (decoded_image[0].cpu() + 1) / 2.0
-decoded_image_for_plot = decoded_image_for_plot.clamp(0, 1).numpy()  # [3, 512, 512]
-decoded_image_for_plot = decoded_image_for_plot.transpose(1, 2, 0)   # [512, 512, 3]
-
-plt.subplot(1, 3, 2)
-plt.imshow(decoded_image_for_plot)
-plt.title("Decoded Image")
-plt.axis("off")
+    latent = latent_dist.sample()  # Latent representation
+    decoded_image = vae.decode(latent).sample  # Basic reconstruction
 
 
-# ---------------------------------------------------
-# 6. Re-encode the decoded image to visualize latents
-# ---------------------------------------------------
-# We must re-normalize to [-1,1] if we want to feed it back in
-decoded_image_tensor = torch.tensor(decoded_image_for_plot.transpose(2, 0, 1),
-                                    dtype=torch.float32, device="cuda")
-decoded_image_tensor = decoded_image_tensor.unsqueeze(0)  # => [1, 3, 512, 512]
-decoded_image_tensor = 2.0 * decoded_image_tensor - 1.0    # map from [0,1] to [-1,1]
+# ---------------------
+# 6. Main visualization
+# ---------------------
+num_cols = 2 + (len(PERTURBATION_STRENGTHS) if APPLY_LATENT_AUGMENTATIONS else 0)
+fig, axes = plt.subplots(1, num_cols, figsize=(16, 6))
 
-with torch.inference_mode():
-    re_encoded_latent = vae.encode(decoded_image_tensor).latent_dist.sample()
-    # Typically shape: [1, latent_channels, 64, 64] if 512 input (depends on model downsampling)
+# Plot original and basic reconstruction
+axes[0].imshow(prepare_for_plot(image_tensor))
+axes[0].set_title("Original Image", fontsize=10)
+axes[0].axis('off')
 
-# Visualize just the first latent channel
-latent_first_channel = re_encoded_latent[0, 0].cpu().numpy()
-plt.subplot(1, 3, 3)
-plt.imshow(latent_first_channel, cmap="viridis")
-plt.title("Re-Encoded Latent (ch=0)")
-plt.axis("off")
+axes[1].imshow(prepare_for_plot(decoded_image))
+axes[1].set_title("Basic Reconstruction", fontsize=10)
+axes[1].axis('off')
+
+# Apply perturbations
+if APPLY_LATENT_AUGMENTATIONS:
+    perturb_fn_map = {
+        "gaussian_noise": add_gaussian_noise,
+        "scaling": scale_latent,
+        "drop_channels": drop_latent_channels
+    }
+
+    perturb_fn = perturb_fn_map["gaussian_noise"]  # Select perturbation type here
+    for idx, strength in enumerate(PERTURBATION_STRENGTHS):
+        perturbed_latent = perturb_fn(latent, strength)
+        with torch.inference_mode():
+            perturbed_decoded = vae.decode(perturbed_latent).sample
+
+        # Visualize the perturbed reconstruction
+        axes[idx + 2].imshow(prepare_for_plot(perturbed_decoded))
+        axes[idx + 2].set_title(f"Strength: {strength}", fontsize=10)
+        axes[idx + 2].axis('off')
 
 plt.tight_layout()
 plt.show()
