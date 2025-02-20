@@ -10,8 +10,9 @@ from omegaconf import DictConfig, OmegaConf
 
 from diffusion.multimodal_diffusion_ddp import MultiModalDiffusion
 from models.dit.dit_multimodal import MultiModalDiT
-from models.vae.loader import load_stable_diffusion_xl_vae
 from diffusion.dataloaders import load_training_data
+from models.utils.model_loader import load_model
+from enums.models.model_types import ModelType
 
 
 
@@ -21,6 +22,8 @@ def main(cfg: DictConfig):
     # ------------------------------------------------------------------------------
     # 1) Build or load the same architecture as used in training
     # ------------------------------------------------------------------------------
+    vae = load_model(ModelType.VAE, model_alias="blabla")
+
     vae = load_stable_diffusion_xl_vae()
     vae.requires_grad_(False)
     vae.eval()
