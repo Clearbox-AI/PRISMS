@@ -1,0 +1,8 @@
+diffusion:
+  sigma_min: 0.002
+  sigma_max: 20
+  p_mean: -0.6
+  p_std: 1.2
+  sigma_data: 0.9
+  num_steps: 18
+  train_mask_ratio: 0.0

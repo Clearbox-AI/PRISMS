@@ -13,6 +13,7 @@ from models.dit.dit_multimodal import MultiModalDiT
 from diffusion.dataloaders import load_training_data
 from models.utils.model_loader import load_model
 from enums.models.model_types import ModelType
+from enums.training_versions import DiTTrainingVersion
 
 
 
@@ -22,13 +23,11 @@ def main(cfg: DictConfig):
     # ------------------------------------------------------------------------------
     # 1) Build or load the same architecture as used in training
     # ------------------------------------------------------------------------------
-    vae = load_model(ModelType.VAE, model_alias="blabla")
-
-    vae = load_stable_diffusion_xl_vae()
+    vae = load_model(model_type=ModelType.VAE)
     vae.requires_grad_(False)
     vae.eval()
 
-    dit_model = MultiModalDiT()
+    dit_model = load_model(model_type=ModelType.DIT, model_variant=DiTTrainingVersion.base_dit_training)
 
     mm_diff_model = MultiModalDiffusion(
         dit=dit_model,
