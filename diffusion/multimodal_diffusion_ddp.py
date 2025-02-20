@@ -34,7 +34,8 @@ class MultiModalDiffusion(nn.Module):
         s_min=0,
         s_max=float('inf'),
         s_noise=1.0,
-        train_mask_ratio=0.0
+        train_mask_ratio=0.0,
+        latent_reg_weight=0.0
     ):
         super().__init__()
         self.dit = dit
@@ -52,6 +53,7 @@ class MultiModalDiffusion(nn.Module):
         self.s_max = s_max
         self.s_noise = s_noise
         self.train_mask_ratio = train_mask_ratio
+        self.latent_reg_weight = latent_reg_weight
 
 
     # def forward(self, images: torch.Tensor, table_data: torch.Tensor):
@@ -117,6 +119,28 @@ class MultiModalDiffusion(nn.Module):
         D_xn = c_skip * noised_input + c_out * F_x
         loss_img = weight * ((D_xn - images) ** 2)
         image_loss = loss_img.mean(dim=[1, 2, 3]).mean()
+
+        # ================================
+        #  SIMPLE LATENT MSE REGULARIZATION
+        # ================================
+        if self.latent_reg_weight > 0:
+            # Encourage the raw DiT output (F_x) to match real latents `images`
+            # reg_loss = F.mse_loss(F_x, images, reduction='mean')
+            # image_loss = image_loss + self.latent_reg_weight * reg_loss
+
+            # or, if you only want to constrain the last 2 channels:
+            # reg_loss = F.mse_loss(F_x[:, 2:, :, :], images[:, 2:, :, :])
+            # image_loss = image_loss + self.latent_reg_weight * reg_loss
+
+            real_mean = images.mean(dim=(0, 2, 3), keepdim=True)
+            real_std = images.std(dim=(0, 2, 3), keepdim=True)
+            pred_mean = F_x.mean(dim=(0, 2, 3), keepdim=True)
+            pred_std = F_x.std(dim=(0, 2, 3), keepdim=True)
+            mean_loss = F.mse_loss(pred_mean, real_mean)
+            std_loss = F.mse_loss(pred_std, real_std)
+            reg_loss = mean_loss + std_loss
+            image_loss = image_loss + self.latent_reg_weight * reg_loss
+        # ================================
 
         tab_loss = None
         if torch.is_tensor(table_data):

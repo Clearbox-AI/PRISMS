@@ -8,16 +8,31 @@ from torch import optim
 from torchvision.utils import save_image
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+import glob
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
 # Import your modules
-from models.latents.stability_ai.autoencoder import load_stable_diffusion_xl_vae
+from models.dit.dit_multimodal import MultiModalDiT
+from models.vae.loader import load_stable_diffusion_xl_vae
 from diffusion.multimodal_diffusion_ddp import MultiModalDiffusion
-from multi_modal_diffusion.model.dit_mm import MultiModalDiT
-from diffusion_process.dataloaders import load_training_data
+from diffusion.dataloaders import load_training_data
 
+
+def strip_ddp_prefix(state_dict, keyword):
+    """
+    Remove the DDP 'module.' prefix from state_dict keys.
+    """
+    new_state_dict = {}
+    prefix = f"{keyword}."
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            new_k = k[len(prefix):]
+        else:
+            new_k = k
+        new_state_dict[new_k] = v
+    return new_state_dict
 
 def setup_distributed(cfg: DictConfig):
     """
@@ -79,10 +94,10 @@ def train_one_epoch(epoch, model, optimizer, train_loader, cfg, vae, local_rank,
         if random.random() < cfg.training.uncond_prob:
             tab_data = None
 
-        # 2) Encode images -> latents (outside the diffusion model)
+        # 2) Encode images -> latents
         with torch.no_grad():
             latents_dist = vae.encode(images)
-            latents = latents_dist.latent_dist.sample() * vae.config.scaling_factor
+            latents = latents_dist.latent_dist.sample() * cfg.vae.scaling_factor
 
         # 3) Forward and loss
         total_loss, image_loss, tab_loss = model(latents, tab_data, global_step)
@@ -121,7 +136,7 @@ def train_one_epoch(epoch, model, optimizer, train_loader, cfg, vae, local_rank,
                     save_path=None
                 )
                 # Now decode latents -> images
-                decoded_imgs = vae.decode(sampled_latents / vae.scaling_factor).sample
+                decoded_imgs = vae.decode(sampled_latents / cfg.vae.scaling_factor).sample
                 decoded_imgs = (decoded_imgs * 0.5 + 0.5).clamp(0, 1)
 
                 cond_file = os.path.join(cfg.training.sample_save_dir, f"samples_step_{global_step}_cond.png")
@@ -145,7 +160,7 @@ def train_one_epoch(epoch, model, optimizer, train_loader, cfg, vae, local_rank,
                     device=device,
                     save_path=None
                 )
-                uncond_imgs = vae.decode(uncond_latents / vae.scaling_factor).sample
+                uncond_imgs = vae.decode(uncond_latents / cfg.vae.scaling_factor).sample
                 uncond_imgs = (uncond_imgs * 0.5 + 0.5).clamp(0, 1)
 
                 uncond_file = os.path.join(cfg.training.sample_save_dir, f"samples_step_{global_step}_uncond.png")
@@ -212,13 +227,17 @@ def main(cfg: DictConfig):
         input_size=cfg.data.image_size,
         patch_size=4,
         in_channels=4,  # for SD latents
-        dim=256,
-        depth=16,
+        dim=512,
+        depth=20,
         head_dim=32,
         num_tab_columns=174,
         tab_groups=10,
-        out_table_features=174
-        # etc.
+        out_table_features=174,
+        multiple_of = 256,
+        patch_mixer_depth=4,
+        patch_mixer_dim=512,
+        patch_mixer_qkv_ratio=1.0,
+        patch_mixer_mlp_ratio=4.0,
     )
 
     # 5) Create MultiModalDiffusion
@@ -231,6 +250,7 @@ def main(cfg: DictConfig):
         sigma_data=cfg.diffusion.sigma_data,
         num_steps=cfg.diffusion.num_steps,
         train_mask_ratio=cfg.diffusion.train_mask_ratio,
+        latent_reg_weight=cfg.training.latent_reg_weight
     )
 
     # Move model to GPU
@@ -247,6 +267,27 @@ def main(cfg: DictConfig):
 
     start_epoch = 0
     global_step = 0
+
+    # Optionally resume training from the latest checkpoint in the given directory
+    if cfg.training.resume:
+        resume_dir = cfg.training.resume_checkpoint_dir  # e.g., same as cfg.training.model_save_dir
+        ckpt_files = sorted(glob.glob(os.path.join(resume_dir, "*.pt")), key=os.path.getmtime)
+        if ckpt_files:
+            resume_path = ckpt_files[-1]
+            print(f"Resuming training from checkpoint: {resume_path}")
+            ckpt = torch.load(resume_path, map_location=device)
+            start_epoch = ckpt.get('epoch', 0)
+            global_step = ckpt.get('step', 0)
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            raw_model_state_dict = ckpt["model_state_dict"]
+            sd = strip_ddp_prefix(raw_model_state_dict, "module")
+            if cfg.distributed.use_ddp:
+                mm_diff_model.module.load_state_dict(sd, strict=True)
+            else:
+                mm_diff_model.load_state_dict(sd, strict=True)
+            print(f"Checkpoint loaded, resuming at epoch {start_epoch}, global step {global_step}")
+        else:
+            print(f"Resume flag is set but no checkpoint file found in {resume_dir}.")
 
     # 8) Training loop
     for epoch in range(start_epoch, cfg.training.epochs):

@@ -1,0 +1,17 @@
+defaults:
+  - ../default_project@_global_
+  - ../trainers/base_dit_training@_global_
+  - _self_  # Ensure current yaml overrides parameters if present
+
+execution_params:
+  dit_checkpoint: "/mnt/storage/nacc_sub/mm_dit_con_vae/checkpoints/checkpoint_step_24000_final.pt"
+
+
+  batch_size: 4
+  device: "cuda"
+
+distributed:
+  use_ddp: false
+  backend: nccl
+
+
