@@ -1,6 +1,7 @@
 defaults:
   - ../models/dit@_global_
   - ../models/vae@_global_
+  - ../datasets/nacc@_global_
   - _self_
 
 dit:
@@ -31,3 +32,19 @@ dit:
   num_experts: 8
   expert_capacity: 1.0
   experts_every_n: 2
+
+data:
+  dataset_type: "nacc"
+  # dimensions
+  image_height: 512
+  image_width: 512
+  target_channels: 3
+  # dataloader
+  batch_size: 4
+  num_workers: 0
+  # processing
+  do_image_normalize: true
+  do_tabular_normalize: true
+  do_augment: false
+  # debugging
+  debug: false

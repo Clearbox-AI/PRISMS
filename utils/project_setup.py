@@ -14,5 +14,6 @@ def get_project_root():
         raise RuntimeError("PRISMS root not found in the script path.")
 
 # Get the project root and export it as an environment variable for Hydra
-PROJECT_ROOT = get_project_root()
-os.environ["PROJECT_ROOT"] = PROJECT_ROOT  # Ensure Hydra sees this variable
+if "PROJECT_ROOT" not in os.environ:
+    PROJECT_ROOT = get_project_root()
+    os.environ["PROJECT_ROOT"] = PROJECT_ROOT  # Ensure Hydra sees this variable
