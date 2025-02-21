@@ -7,7 +7,7 @@ import glob
 from torch.utils.data import DataLoader, DistributedSampler
 from sklearn.preprocessing import StandardScaler
 
-from nacc_dataset import NaccDataset
+from data.nacc_dataset import NaccDataset
 from enums.data import DatasetType
 
 import os

@@ -15,9 +15,6 @@ import numpy as np
 from torch.utils.data import Dataset
 from glob import glob
 import nibabel as nib
-from sklearn.preprocessing import StandardScaler
-from torch.utils.data.distributed import DistributedSampler
-from multi_modal_diffusion import dist_util
 import os
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
@@ -26,110 +23,11 @@ from enums.latent_type import LatentType
 import torch.distributed as dist
 import albumentations as A
 
-from diffusion_process.enums import DatasetType
+from enums.data import DatasetType, ImageRange
 from monai.transforms import (
     Compose, RandFlip, RandRotate, RandZoom,
     RandGaussianNoise, RandBiasField, RandAdjustContrast
 )
-
-# def load_training_data(args):
-#     """
-#     Load training data based on the chosen dataset type.
-#     `args.dataset_type` should be a value from DatasetType enum.
-#     Additional dataset-specific parameters can be included in args.
-#     """
-#
-#     # You can add dataset-specific argument parsing or defaults in your config if needed
-#     # For example, args could have fields like args.image_size, args.max_samples, etc.
-#
-#     if args.dataset_type == DatasetType.NACC:
-#         dataset = NaccDataset(
-#             data_dir=args.data_dir,
-#             image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') and hasattr(args, 'image_width')
-#             else (64, 64)
-#         )
-#     elif args.dataset_type == DatasetType.NACC_LATENTS:
-#         dataset = NaccLatentsDataset(
-#             data_dir=args.data_dir,
-#             image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') and hasattr(args,'image_width')
-#             else (64, 64)
-#         )
-#     elif args.dataset_type == DatasetType.TOY_MNIST:
-#         dataset = ToyMNISTDataset(
-#             data_dir=args.data_dir,
-#             resize_to=(args.toy_resize_height, args.toy_resize_width) if hasattr(args, 'toy_resize_height') else (32, 32)
-#         )
-#     elif args.dataset_type == DatasetType.EXP_LUMIR:
-#         dataset = ExpLumirDataset(
-#             data_dir=args.data_dir,
-#             image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') else (64, 64),
-#             max_samples=args.max_samples if hasattr(args, 'max_samples') else None
-#         )
-#     elif args.dataset_type == DatasetType.LDM_ONE_H:
-#         dataset = LDMOneHDataset(
-#             data_dir=args.data_dir,
-#             image_size=(args.image_height, args.image_width) if hasattr(args, 'image_height') else (64, 64),
-#             # modality=args.modality if hasattr(args, 'modality') else "tabular"
-#             modality=args.modality if hasattr(args, 'modality') else "image"
-#         )
-#     else:
-#         raise ValueError(f"Unsupported dataset type: {args.dataset_type}")
-#
-#     sampler = DistributedSampler(dataset, shuffle=False, drop_last=True) if dist_util.get_world_size() > 1 else None
-#     data_loader = th.utils.data.DataLoader(
-#         dataset,
-#         batch_size=args.batch_size,
-#         num_workers=args.num_workers,
-#         pin_memory=True,
-#         drop_last=True,
-#         sampler=sampler,
-#     )
-#     return data_loader
-
-# TODO: BEFORE DDP
-# def load_training_data(cfg: DictConfig):
-#     """
-#     Creates a DataLoader for the NACC dataset (or other possible sets)
-#     depending on Hydra config values in cfg.data and cfg.model.
-#     """
-#
-#     dataset_type = cfg.data.dataset_type.lower()
-#
-#     if dataset_type == "nacc":
-#         # Decide final image range based on VAE choice
-#         # e.g. "sd_xl" => we want [-1,1], or "none" => no shift
-#         vae_name = cfg.vae.model_alias
-#         if vae_name == LatentType.SD_XL.value:
-#             final_range = "minus1to1"
-#         else:
-#             final_range = "none"
-#             # or "0to1", depending on your preference
-#
-#         dataset = NaccDataset(
-#             data_dir=cfg.data.data_dir,
-#             image_height=cfg.data.image_height,
-#             image_width=cfg.data.image_width,
-#             domain=cfg.data.domain,  # "mri" or "ct"
-#             do_augment=cfg.data.do_augment,
-#             do_image_normalize=cfg.data.do_image_normalize,
-#             do_tabular_normalize=cfg.data.do_tabular_normalize,
-#             target_channels=cfg.vae.target_channels,
-#             final_image_range=final_range,
-#             debug=cfg.data.debug
-#         )
-#     else:
-#         raise ValueError(f"Unsupported dataset type: {dataset_type}")
-#
-#     sampler = DistributedSampler(dataset, shuffle=False, drop_last=True) if dist_util.get_world_size() > 1 else None
-#     loader = DataLoader(
-#         dataset=dataset,
-#         batch_size=cfg.training.batch_size,
-#         num_workers=cfg.training.num_workers,
-#         pin_memory=True,
-#         drop_last=True,
-#         sampler=sampler
-#     )
-#     return loader
 
 def load_training_data(cfg: DictConfig):
     """
@@ -140,7 +38,7 @@ def load_training_data(cfg: DictConfig):
 
     vae_name = cfg.vae.model_alias
     if vae_name == LatentType.SD_XL.value:
-        final_range = "minus1to1"
+        final_range = ImageRange.minus1to1
     else:
         final_range = "none"
         # or "0to1", depending on your preference
@@ -200,19 +98,19 @@ from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 
-# def debug_getitem(func):
-#     """
-#     Decorator to optionally visualize the image for debugging
-#     (only on the first call if self.debug == True).
-#     """
-#     def wrapper(self, idx):
-#         data = func(self, idx)
-#         if self.debug and not self._debug_shown:
-#             image = data["image"]  # shape [C,H,W], torch tensor
-#             self._debug_show_image(image)
-#             self._debug_shown = True
-#         return data
-#     return wrapper
+def debug_getitem(func):
+    """
+    Decorator to optionally visualize the image for debugging
+    (only on the first call if self.debug == True).
+    """
+    def wrapper(self, idx):
+        data = func(self, idx)
+        if self.debug and not self._debug_shown:
+            image = data["image"]  # shape [C,H,W], torch tensor
+            self._debug_show_image(image)
+            self._debug_shown = True
+        return data
+    return wrapper
 
 class NaccDataset(Dataset):
     """
@@ -282,7 +180,7 @@ class NaccDataset(Dataset):
     def __len__(self):
         return len(self.patient_dirs)
 
-    # @debug_getitem
+    @debug_getitem
     def __getitem__(self, idx):
         patient_dir = self.patient_dirs[idx]
 

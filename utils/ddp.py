@@ -1,3 +1,5 @@
+import torch.distributed as dist
+
 def is_main_process():
     """
     Utility to check if current process is the global rank 0.

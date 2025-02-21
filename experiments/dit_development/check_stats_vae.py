@@ -10,7 +10,9 @@ from omegaconf import DictConfig, OmegaConf
 
 from diffusion.multimodal_diffusion_ddp import MultiModalDiffusion
 from models.dit.dit_multimodal import MultiModalDiT
-from diffusion.dataloaders import load_training_data
+from data.loader import load_training_data
+from utils.ddp import strip_ddp_prefix
+
 from models.utils.model_loader import load_model
 from enums.models.model_types import ModelType
 from enums.training_versions import DiTTrainingVersion
@@ -26,68 +28,40 @@ def main(cfg: DictConfig):
     vae = load_model(model_type=ModelType.VAE)
     vae.requires_grad_(False)
     vae.eval()
+    vae.to(device=cfg.execution_params.device)
 
-    dit_model = load_model(model_type=ModelType.DIT, model_variant=DiTTrainingVersion.base_dit_training)
+    mm_diff_model = load_model(model_type=ModelType.DIFFUSION, model_variant=DiTTrainingVersion.base_dit_training)
+    mm_diff_model.to(cfg.execution_params.device)
 
-    mm_diff_model = MultiModalDiffusion(
-        dit=dit_model,
-        sigma_min=0.002,        # placeholders—match your training
-        sigma_max=20,
-        p_mean=-0.6,
-        p_std=1.2,
-        sigma_data=0.9,
-        num_steps=18,
-        train_mask_ratio=0.0
-    )
-
-    # Move to device
-    mm_diff_model.to(device)
+    # dit_model = load_model(model_type=ModelType.DIT, model_variant=DiTTrainingVersion.base_dit_training)
+    dit_model = mm_diff_model.dit
+    dit_model.to(cfg.execution_params.device)
 
     # ------------------------------------------------------------------------------
     # 2) Load checkpoint
     # ------------------------------------------------------------------------------
 
     checkpoint_path = cfg.execution_params.dit_checkpoint
-    ckpt = torch.load(checkpoint_path, map_location=device)
-    # load from a ddp model need some precaution
+    ckpt = torch.load(checkpoint_path, map_location=cfg.execution_params.device)
+
     raw_sd = ckpt["model_state_dict"]
-    sd = strip_ddp_prefix(raw_sd)
-    mm_diff_model.load_state_dict(sd, strict=True)
+    mm_diff_model.load_state_dict(raw_sd, strict=True)
 
     mm_diff_model.eval()
 
-    # ------------------------------------------------------------------------------
-    # 3) Build a conditioning row if requested
-    # ------------------------------------------------------------------------------
-    if condition:
-        # Suppose your table has 174 features, just as an example
-        # Create a random normal row for each sample
-        condition_tab = torch.randn(batch_size, 174, device=device)
-        print("Using a random tabular row for conditioning.")
-    else:
-        condition_tab = None
-        print("No conditioning (unconditional).")
-
-    # ------------------------------------------------------------------------------
-    # 4) Sample from the model. We want latents & the final images.
-    #    -> This requires you to modify your .sample() method to return latents
-    #       or we do an alternative approach. We'll assume you have a param "return_latents=True".
-    # ------------------------------------------------------------------------------
-
-    num_sample_batches = 100  # Match num_stat_batches for fair comparison
-    num_stat_batches = 100  # Adjust based on available memory/data
+    num_batches = cfg.execution_params.num_batches
     all_generated_latents = []
 
     with torch.no_grad():
-        for _ in range(num_sample_batches):
+        for _ in range(num_batches):
             latents, _ = mm_diff_model.sample(
-                batch_size=batch_size,
-                table_data=condition_tab,
+                batch_size=cfg.execution_params.batch_size,
+                table_data=torch.randn(cfg.execution_params.batch_size, 174, device=cfg.execution_params.device),
                 cfg=1.0,
                 steps=None,
                 height=64,
                 width=64,
-                device=device,
+                device=cfg.execution_params.device,
                 save_path=None
             )
             all_generated_latents.append(latents)
@@ -108,9 +82,9 @@ def main(cfg: DictConfig):
 
     train_loader = load_training_data(cfg)
     for batch_idx, batch in enumerate(train_loader):
-        if batch_idx >= num_stat_batches:
+        if batch_idx >= num_batches:
             break
-        loaded_images = batch['image'].to(device)
+        loaded_images = batch['image'].to(cfg.execution_params.device)
         with torch.no_grad():
             encoded_original = vae.encode(loaded_images)
             latents_batch = encoded_original.latent_dist.sample() * vae.config.scaling_factor

@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 
 from models.dit.dit_multimodal import MultiModalDiT
-from models.tmp_name.diffusion_multimodal import MultiModalDiffusion
+from diffusion.multimodal_diffusion import MultiModalDiffusion
 from enums.models.model_types import ModelType
 from enums.training_versions import DiTTrainingVersion
 
@@ -149,6 +149,7 @@ def load_model(
         if model_type == ModelType.DIFFUSION:
             with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
                 cfg = compose(config_name="diffusion")
+
             diffusion_model = load_diffusion(cfg, dit_model, **overrides)
             return diffusion_model
 
