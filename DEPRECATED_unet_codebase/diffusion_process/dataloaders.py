@@ -355,7 +355,7 @@ class NaccDataset(Dataset):
             return image
         elif frange == "0to1":
             return np.clip(image, 0.0, 1.0)
-        elif frange == "minus1to1":
+        elif frange == ImageRange.minus1to1:
             # If standardization produced negative values, you could skip re-mapping.
             # Or forcibly min-max scale to [0,1], then shift to [-1,1].
             # We'll do the latter as an example:

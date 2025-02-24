@@ -29,7 +29,7 @@ class NaccDataset(BaseNaccDataset):
                  do_image_normalize: bool = True,
                  do_tabular_normalize: bool = True,
                  target_channels: int = 3,
-                 final_image_range: str = "none",
+                 final_image_range: ImageRange = "none",
                  debug: bool = False,
                  stats_file: str = None  # path to JSON with precomputed stats
                  ):
@@ -204,7 +204,7 @@ class NaccDataset(BaseNaccDataset):
             out = np.concatenate([out, img[:remainder, :, :]], axis=0)
         return out
 
-    def _map_final_range(self, image: np.ndarray, frange: str) -> np.ndarray:
+    def _map_final_range(self, image: np.ndarray, frange: ImageRange) -> np.ndarray:
         if frange == ImageRange.plus0to1:
             return np.clip(image, 0.0, 1.0)
         elif frange == ImageRange.minus1to1:

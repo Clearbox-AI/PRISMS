@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from sklearn.preprocessing import StandardScaler
 
 from data.nacc_dataset import NaccDataset
-from enums.data import DatasetType
+from enums.data import DatasetType, ImageRange
 
 import os
 from hydra import compose, initialize_config_dir
@@ -41,7 +41,7 @@ def load_training_data(cfg: DictConfig) -> DataLoader:
             do_image_normalize=cfg.data.do_image_normalize,
             do_tabular_normalize=cfg.data.do_tabular_normalize,
             target_channels=cfg.data.target_channels,
-            final_image_range=cfg.data.final_image_range,
+            final_image_range=ImageRange(cfg.data.final_image_range) ,
             debug=cfg.data.debug,
             stats_file=stats_path
         )
@@ -145,25 +145,48 @@ def compute_dataset_stats(data_dir: str, stats_path: str):
 
 if __name__ == "__main__":
 
+    import torch
+
+
+    def compute_stats(loader, max_batches=20):
+        """
+        Iterates through `max_batches` of the DataLoader, stores all images in a large tensor,
+        and computes:
+          - Global mean & variance
+          - Per-channel mean & variance
+        """
+        latents = []
+
+        for i, batch in enumerate(loader):
+            images = batch["image"]  # Shape: [B, C, H, W]
+            latents.append(images)
+
+            if i + 1 >= max_batches:
+                break  # Stop after `max_batches`
+
+        # Stack all collected images into a single tensor
+        latents = torch.cat(latents, dim=0)  # Shape: [Total_B, C, H, W]
+
+        # Compute statistics
+        global_mean = torch.mean(latents)
+        global_var = torch.var(latents, unbiased=True)
+        channel_mean = torch.mean(latents, dim=(0, 2, 3))  # Shape: [C]
+        channel_var = torch.var(latents, dim=(0, 2, 3), unbiased=True)  # Shape: [C]
+
+        return global_mean, global_var, channel_mean, channel_var
+
+
     with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "trainers"))):
         cfg = compose(config_name="base_dit_training")  # Adjust if needed
         OmegaConf.set_struct(cfg, False)
 
-        # Try loading the DataLoader
+        print("[INFO] Loading first DataLoader...")
         loader = load_training_data(cfg)
-        print("[INFO] DataLoader created successfully.")
 
-        # (Pseudo-test) Grab one batch
-        try:
-            first_batch = next(iter(loader))
-            imgs = first_batch["image"]
-            tabs = first_batch["tabular"]
+        # Compute statistics over 20 batches
+        global_mean, global_var, channel_mean, channel_var = compute_stats(loader, max_batches=2000)
 
-            print(f"[INFO] Retrieved a batch of size {imgs.shape[0]}")
-            print(f"[INFO] Image tensor shape: {imgs.shape}")
-            print(f"[INFO] Tabular tensor shape: {tabs.shape}")
-
-        except StopIteration:
-            print("[WARNING] The loader is empty (no data found).")
-        except Exception as e:
-            print(f"[ERROR] An error occurred while fetching a batch: {e}")
+        print(f"[INFO] First DataLoader Global Mean: {global_mean.item()}")
+        print(f"[INFO] First DataLoader Global Variance: {global_var.item()}")
+        print(f"[INFO] First DataLoader Per-Channel Mean: {channel_mean.tolist()}")
+        print(f"[INFO] First DataLoader Per-Channel Variance: {channel_var.tolist()}")
