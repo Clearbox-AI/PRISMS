@@ -1,19 +1,12 @@
-# import utils.project_setup
-import argparse
-import os
 from pathlib import Path
 import json
 import torch
-import numpy as np
 import matplotlib.pyplot as plt
-from torch import optim
+from tqdm import tqdm
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
-from diffusion.multimodal_diffusion_ddp import MultiModalDiffusion
-from models.dit.dit_multimodal import MultiModalDiT
 from data.loader import load_training_data
-from utils.ddp import strip_ddp_prefix
 from utils.model import load_checkpoint
 from utils.path_management import setup_exp_directory
 
@@ -57,8 +50,9 @@ def main(cfg: DictConfig):
     num_batches = cfg.execution_params.num_batches
     all_generated_latents = []
 
+    print("\nGenerating latents...")
     with torch.no_grad():
-        for _ in range(num_batches):
+        for _ in tqdm(range(num_batches), desc="Generating", unit="batch"):
             latents, _ = mm_diff_model.sample(
                 batch_size=cfg.execution_params.batch_size,
                 table_data=torch.randn(cfg.execution_params.batch_size, 174, device=cfg.execution_params.device),
@@ -79,7 +73,8 @@ def main(cfg: DictConfig):
     all_original_latents = []
     train_loader = load_training_data(cfg)
 
-    for batch_idx, batch in enumerate(train_loader):
+    print("\nCollecting original latents...")
+    for batch_idx, batch in tqdm(enumerate(train_loader), total=num_batches, desc="Collecting", unit="batch"):
         if batch_idx >= num_batches:
             break
         loaded_images = batch['image'].to(cfg.execution_params.device)

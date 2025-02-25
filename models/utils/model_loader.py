@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 
 from models.dit.dit_multimodal import MultiModalDiT
-from diffusion.multimodal_diffusion import MultiModalDiffusion
+from models.diffusion.diffusion_multimodal import MultiModalDiffusion
 from enums.models.model_types import ModelType
 from enums.training_versions import DiTTrainingVersion
 

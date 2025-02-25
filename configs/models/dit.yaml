@@ -1,8 +1,8 @@
 dit:
   # base input settings
-  input_size: 640
+  input_size: 64
   patch_size: 2
-  in_channels: 3
+  in_channels: 4
   dim: 512
   depth: 6
   head_dim: 64
@@ -13,9 +13,9 @@ dit:
   depth_init: True
   use_bias: True
   # tabular settings
-  num_tab_columns: 10
-  tab_groups: 3
-  out_table_features: 10
+  num_tab_columns: 174
+  tab_groups: 10
+  out_table_features: 174
   # Patch mixer
   use_patch_mixer: False
   patch_mixer_depth: 2
@@ -26,6 +26,4 @@ dit:
   num_experts: 8
   expert_capacity: 1.0
   experts_every_n: 2
-
-
 

@@ -48,3 +48,29 @@ data:
   do_augment: false
   # debugging
   debug: false
+
+diffusion:
+  sigma_min: 0.002
+  sigma_max: 20
+  p_mean: -0.6
+  p_std: 1.2
+  sigma_data: 0.9
+  num_steps: 18
+  train_mask_ratio: 0.0
+
+training:
+  epochs: 800
+  lr: 1.5e-4
+  device: "cuda"
+  sample_batch_size: 4
+  latent_reg_weight: 0.01
+
+#  batch_size: 8
+#  num_workers: 0
+#  uncond_prob: 0 #0.2
+
+#  log_interval: 10
+#  sample_interval: 100
+#  sample_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/samples"
+#  save_model_interval: 2000
+#  model_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/checkpoints"

@@ -5,6 +5,8 @@ import torch.nn.functional as F
 import os
 import numpy as np
 from torchvision.utils import save_image
+import torch.distributed as dist
+from utils.ddp import is_main_process
 
 
 class MultiModalDiffusion(nn.Module):
@@ -16,7 +18,6 @@ class MultiModalDiffusion(nn.Module):
     def __init__(
         self,
         dit: nn.Module,
-        vae: nn.Module = None,
         sigma_min=0.002,
         sigma_max=80,
         p_mean=-0.6,
@@ -28,15 +29,11 @@ class MultiModalDiffusion(nn.Module):
         s_min=0,
         s_max=float('inf'),
         s_noise=1.0,
-        train_mask_ratio=0.0
+        train_mask_ratio=0.0,
+        latent_reg_weight=0.0
     ):
         super().__init__()
         self.dit = dit
-        self.vae = vae
-        if self.vae is not None:
-            self.latent_scale = getattr(self.vae.config, 'scaling_factor', 1.0)
-        else:
-            self.latent_scale = 1.0
 
         # EDM hyperparams
         self.sigma_min = sigma_min
@@ -51,30 +48,11 @@ class MultiModalDiffusion(nn.Module):
         self.s_max = s_max
         self.s_noise = s_noise
         self.train_mask_ratio = train_mask_ratio
+        self.latent_reg_weight = latent_reg_weight
 
-    def latents_encode(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Encode real images [0,1] => latents (if VAE).
-        """
-        if self.vae is not None:
-            # x = x * 2.0 - 1.0  # [0,1]->[-1,1]
-            latents_dist = self.vae.encode(x)
-            latents = latents_dist.latent_dist.sample()
-            return latents * self.latent_scale
-        return x
 
-    def latents_decode(self, latents: torch.Tensor) -> torch.Tensor:
-        """
-        Decode latents => [0,1] images (if VAE).
-        """
-        if self.vae is not None:
-            latents = latents / self.latent_scale
-            decoded = self.vae.decode(latents).sample
-            decoded = decoded * 0.5 + 0.5
-            return decoded.clamp(0, 1)
-        return latents
-
-    def training_step(self, images: torch.Tensor, table_data: torch.Tensor):
+    # def forward(self, images: torch.Tensor, table_data: torch.Tensor):
+    def forward(self, images: torch.Tensor, table_data: torch.Tensor, global_step: int = 0):
         """
         EDM loss: sample sigma, noise, pass to DiT, compute MSE.
         """
@@ -87,12 +65,14 @@ class MultiModalDiffusion(nn.Module):
 
         # 2) Weight
         weight = ((sigma**2 + self.sigma_data**2) / (sigma*self.sigma_data)**2)
+        # weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
 
         # 3) Noise
         noise = torch.randn_like(images)
         noised_input = images + sigma * noise
 
         # 4) EDM scaling
+        # c_in, c_skip, c_out from Karras et al. (EDM)
         sigma_in = sigma.reshape(-1, 1, 1, 1)
         c_in = 1.0 / (self.sigma_data**2 + sigma_in**2).sqrt()
         c_skip = self.sigma_data**2 / (sigma_in**2 + self.sigma_data**2)
@@ -109,10 +89,53 @@ class MultiModalDiffusion(nn.Module):
         )
         F_x = out['image_sample']
 
+        # ---------------------------
+        #  DEBUG: LOG SCALE OF F_x
+        # ---------------------------
+        # For instance, log every 50 steps only on the main process.
+        log_interval = 50
+        if is_main_process() and (global_step % log_interval == 0):
+            log_dir = "/mnt/storage/nacc_sub/mm_dit_con_vae/tmp"
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, "debug_scales.csv")
+
+            # Collect simple stats
+            f_mean = F_x.mean().item()
+            f_std = F_x.std().item()
+            lat_mean = images.mean().item()
+            lat_std = images.std().item()
+
+            # Append to CSV
+            with open(log_file, "a") as f:
+                # step, f_mean, f_std, lat_mean, lat_std
+                f.write(f"{global_step},latents: {f_mean:.5f},{f_std:.5f}, real: {lat_mean:.5f},{lat_std:.5f}\n")
+
         # Combine
         D_xn = c_skip * noised_input + c_out * F_x
         loss_img = weight * ((D_xn - images) ** 2)
         image_loss = loss_img.mean(dim=[1, 2, 3]).mean()
+
+        # ================================
+        #  SIMPLE LATENT MSE REGULARIZATION
+        # ================================
+        if self.latent_reg_weight > 0:
+            # Encourage the raw DiT output (F_x) to match real latents `images`
+            # reg_loss = F.mse_loss(F_x, images, reduction='mean')
+            # image_loss = image_loss + self.latent_reg_weight * reg_loss
+
+            # or, if you only want to constrain the last 2 channels:
+            # reg_loss = F.mse_loss(F_x[:, 2:, :, :], images[:, 2:, :, :])
+            # image_loss = image_loss + self.latent_reg_weight * reg_loss
+
+            real_mean = images.mean(dim=(0, 2, 3), keepdim=True)
+            real_std = images.std(dim=(0, 2, 3), keepdim=True)
+            pred_mean = F_x.mean(dim=(0, 2, 3), keepdim=True)
+            pred_std = F_x.std(dim=(0, 2, 3), keepdim=True)
+            mean_loss = F.mse_loss(pred_mean, real_mean)
+            std_loss = F.mse_loss(pred_std, real_std)
+            reg_loss = mean_loss + std_loss
+            image_loss = image_loss + self.latent_reg_weight * reg_loss
+        # ================================
 
         tab_loss = None
         if torch.is_tensor(table_data):
@@ -191,14 +214,17 @@ class MultiModalDiffusion(nn.Module):
                 d_prime = (x_next - denoised2)/t_next
                 x_next = x_hat + (t_next - t_hat)*(0.5*d_cur + 0.5*d_prime)
 
-        samples = self.latents_decode(x_next.float())
+        final_latents = x_next.float()
 
         # Optionally save
         if save_path is not None:
+            # This is purely optional for debugging; not typical to visualize raw latents
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            save_image(samples, save_path, nrow=int(batch_size**0.5))
+            # e.g., just clamp and do some fake normalization?
+            latents_for_vis = (final_latents - final_latents.min()) / (final_latents.max() - final_latents.min() + 1e-7)
+            save_image(latents_for_vis, save_path, nrow=int(batch_size ** 0.5))
 
-        return samples, latest_tab_sample
+        return final_latents, latest_tab_sample
 
     def create_edm_timesteps(self, steps, device):
         step_indices = torch.arange(steps, dtype=torch.float64, device=device)

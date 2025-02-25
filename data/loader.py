@@ -2,6 +2,7 @@ import utils.project_setup
 import json
 import numpy as np
 import torch.distributed as dist
+import torch
 import glob
 
 from torch.utils.data import DataLoader, DistributedSampler
@@ -144,9 +145,6 @@ def compute_dataset_stats(data_dir: str, stats_path: str):
 
 
 if __name__ == "__main__":
-
-    import torch
-
 
     def compute_stats(loader, max_batches=20):
         """
