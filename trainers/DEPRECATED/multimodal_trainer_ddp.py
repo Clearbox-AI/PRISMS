@@ -193,7 +193,7 @@ def train_one_epoch(epoch, model, optimizer, train_loader, cfg, vae, local_rank,
     return global_step, last_total_loss
 
 
-@hydra.main(version_base=None, config_path="../configs/trainers", config_name="base_dit_training")
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):
 
     print("Full config:\n", OmegaConf.to_yaml(cfg))

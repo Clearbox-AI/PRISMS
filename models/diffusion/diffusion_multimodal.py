@@ -4,12 +4,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 from torchvision.utils import save_image
+from omegaconf import DictConfig
+from pathlib import Path
+from hydra import compose, initialize_config_dir
 
-from models.utils.model_loader import load_model
-from enums.models.model_types import ModelType
 from utils.ddp import is_main_process
+from utils.configurations import apply_overrides
+from models.dit.dit_multimodal import load_dit
 
 
 class MultiModalDiffusion(nn.Module):
@@ -265,33 +268,67 @@ class MultiModalDiffusion(nn.Module):
         return t_values
 
 
+def load_diffusion(cfg: DictConfig, dit_model: nn.Module, **overrides: Any) -> nn.Module:
+    """
+    Load a MultiModalDiffusion model based on the provided configuration.
+
+    The config is expected to have a top-level 'diffusion' section containing the parameters
+    for the MultiModalDiffusion. The 'dit_model' argument is required because
+    MultiModalDiffusion depends on a pre-loaded DiT model.
+
+    Args:
+        cfg (DictConfig): The Hydra configuration object (must contain a 'diffusion' section).
+        dit_model (nn.Module): The already loaded DiT model, required by the Diffusion model.
+        **overrides (Any): Arbitrary keyword arguments used to override the default configuration.
+
+    Returns:
+        nn.Module: The loaded MultiModalDiffusion model.
+    """
+    # Apply any overrides to the config before loading
+    cfg = apply_overrides(cfg, overrides)
+
+    print("[INFO] Loading Diffusion model with config:", cfg)
+
+    # Instantiate the Diffusion model, injecting the loaded DiT
+    diffusion_model = MultiModalDiffusion(dit=dit_model, **cfg.diffusion)
+    print("[INFO] Loaded Diffusion Model")
+    return diffusion_model
+
+
 if __name__ == "__main__":
     """
     Simple test driver for MultiModalDiffusion with Hydra-based config.
     """
 
-    diffusion_model = load_model(model_type=ModelType.DIFFUSION).cuda()
+    from utils.configurations import set_project_root
+    set_project_root()
 
-    # Make up some dummy data
-    images = torch.randn(4, 4, 64, 64).cuda()
-    table_data = torch.randn(4, 174).cuda()  # (B=4, some tab dim=10)
+    with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
+        dit_cfg = compose(config_name="dit")
+        dit_model = load_dit(dit_cfg)
+        diffusion_cfg = compose(config_name="diffusion")
+        diffusion_model = load_diffusion(diffusion_cfg, dit_model).cuda()
 
-    # Forward pass
-    total_loss, image_loss, tab_loss = diffusion_model(images, table_data)
-    print(f"Total loss: {total_loss.item():.4f}")
-    print(f"Image loss: {image_loss.item():.4f}")
-    print(f"Table loss: {tab_loss.item():.4f}" if tab_loss is not None else "No table loss")
+        # Make up some dummy data
+        images = torch.randn(4, 4, 64, 64).cuda()
+        table_data = torch.randn(4, 174).cuda()  # (B=4, some tab dim=10)
 
-    # Sampling demonstration
-    with torch.no_grad():
-        latents, latest_tab = diffusion_model.sample(
-            batch_size=4,
-            table_data=table_data,
-            steps=10,
-            height=64,
-            width=64,
-            device='cuda'
-        )
-        print("Sampled latents shape:", latents.shape)
-        if latest_tab is not None:
-            print("Sampled table shape:", latest_tab.shape)
+        # Forward pass
+        total_loss, image_loss, tab_loss = diffusion_model(images, table_data)
+        print(f"Total loss: {total_loss.item():.4f}")
+        print(f"Image loss: {image_loss.item():.4f}")
+        print(f"Table loss: {tab_loss.item():.4f}" if tab_loss is not None else "No table loss")
+
+        # Sampling demonstration
+        with torch.no_grad():
+            latents, latest_tab = diffusion_model.sample(
+                batch_size=4,
+                table_data=table_data,
+                steps=10,
+                height=64,
+                width=64,
+                device='cuda'
+            )
+            print("Sampled latents shape:", latents.shape)
+            if latest_tab is not None:
+                print("Sampled table shape:", latest_tab.shape)

@@ -59,11 +59,13 @@ diffusion:
   train_mask_ratio: 0.0
 
 training:
-  epochs: 800
-  lr: 1.5e-4
+
   device: "cuda"
   sample_batch_size: 4
   latent_reg_weight: 0.01
+
+#  epochs: 800
+#  lr: 1.5e-4
 
 #  batch_size: 8
 #  num_workers: 0

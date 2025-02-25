@@ -103,7 +103,9 @@ def main(cfg: DictConfig):
     # --------------------
     # 6) Set up save directory and save results
     # --------------------
-    save_dir = setup_exp_directory(cfg.execution_params.get("save_path") or Path(__file__).resolve().parent.parent)
+    save_dir = setup_exp_directory(
+        base_path=cfg.execution_params.get("save_path") or Path(Path(__file__).resolve().parent.parent, "storage")
+    )
 
     # Save statistics to text file
     save_statistics(file_path=str(Path(save_dir, "latent_statistics.json")), label="GENERATED.\n", stats=gen_stats)

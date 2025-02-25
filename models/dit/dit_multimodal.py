@@ -7,6 +7,9 @@ from collections.abc import Iterable
 from itertools import repeat
 from typing import Optional, Tuple, Dict, Union, List, Any
 
+from omegaconf import DictConfig
+from utils.configurations import apply_overrides
+
 
 def ntuple(n: int):
     """Converts input into an n-tuple."""
@@ -991,6 +994,26 @@ class MultiModalDiT(nn.Module):
         return np.concatenate([emb_h, emb_w], axis=1)
 
 
+def load_dit(cfg: DictConfig, **overrides: Any) -> nn.Module:
+    """
+    Load a MultiModalDiT model based on the provided configuration.
+
+    Args:
+        cfg (DictConfig): The Hydra configuration object for the DiT model.
+        **overrides (Any): Arbitrary keyword arguments used to override the default configuration.
+
+    Returns:
+        nn.Module: The loaded MultiModalDiT model.
+    """
+    # Apply any overrides to the config before loading
+    cfg = apply_overrides(cfg, overrides)
+
+    print("[INFO] Loading MultiModalDiT model with config:", cfg)
+
+    # Instantiate the MultiModalDiT model
+    model = MultiModalDiT(**cfg.dit)
+    print("[INFO] Loaded DiT")
+    return model
 
 ###############################################################################
 # Usage Example:

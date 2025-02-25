@@ -1,4 +1,3 @@
-import utils.project_setup
 import json
 import numpy as np
 import torch.distributed as dist
@@ -146,6 +145,9 @@ def compute_dataset_stats(data_dir: str, stats_path: str):
 
 if __name__ == "__main__":
 
+    from utils.configurations import set_project_root
+    set_project_root()
+
     def compute_stats(loader, max_batches=20):
         """
         Iterates through `max_batches` of the DataLoader, stores all images in a large tensor,
@@ -178,13 +180,13 @@ if __name__ == "__main__":
         cfg = compose(config_name="base_dit_training")  # Adjust if needed
         OmegaConf.set_struct(cfg, False)
 
-        print("[INFO] Loading first DataLoader...")
+        print("[INFO] Loading DataLoader...")
         loader = load_training_data(cfg)
 
         # Compute statistics over 20 batches
         global_mean, global_var, channel_mean, channel_var = compute_stats(loader, max_batches=2000)
 
-        print(f"[INFO] First DataLoader Global Mean: {global_mean.item()}")
-        print(f"[INFO] First DataLoader Global Variance: {global_var.item()}")
-        print(f"[INFO] First DataLoader Per-Channel Mean: {channel_mean.tolist()}")
-        print(f"[INFO] First DataLoader Per-Channel Variance: {channel_var.tolist()}")
+        print(f"[INFO] DataLoader Global Mean: {global_mean.item()}")
+        print(f"[INFO] DataLoader Global Variance: {global_var.item()}")
+        print(f"[INFO] DataLoader Per-Channel Mean: {channel_mean.tolist()}")
+        print(f"[INFO] DataLoader Per-Channel Variance: {channel_var.tolist()}")

@@ -1,94 +1,17 @@
-import utils.project_setup
 import os
-from hydra import compose, initialize, initialize_config_dir
+from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
-import torch
 import torch.nn as nn
 
-from diffusers import AutoencoderKL
-from omegaconf import DictConfig, OmegaConf
-from typing import Dict, Any, Optional
+from omegaconf import OmegaConf
+from typing import Any, Optional
 from pathlib import Path
 
-from models.dit.dit_multimodal import MultiModalDiT
-from models.diffusion.diffusion_multimodal import MultiModalDiffusion
 from enums.models.model_types import ModelType
 from enums.training_versions import DiTTrainingVersion
-
-
-def load_vae(cfg: DictConfig, **overrides: Any) -> nn.Module:
-    """
-    Load a VAE model (specifically an AutoencoderKL from diffusers) based on the provided configuration.
-
-    Args:
-        cfg (DictConfig): The Hydra configuration object for the VAE.
-        **overrides (Any): Arbitrary keyword arguments used to override the default configuration.
-
-    Returns:
-        nn.Module: The loaded VAE model.
-    """
-    # Apply any overrides to the config before loading
-    cfg = apply_overrides(cfg, overrides)
-
-    print("[INFO] Loading VAE model with config:", cfg)
-
-    # Instantiate the VAE model from HuggingFace diffusers
-    vae = AutoencoderKL.from_pretrained(
-        cfg.vae.model_name,
-        subfolder=cfg.vae.subfolder,
-        torch_dtype=getattr(torch, cfg.vae.dtype),
-    )
-    print(f"[INFO] Loaded VAE: {cfg.vae.model_name}")
-    return vae
-
-
-def load_dit(cfg: DictConfig, **overrides: Any) -> nn.Module:
-    """
-    Load a MultiModalDiT model based on the provided configuration.
-
-    Args:
-        cfg (DictConfig): The Hydra configuration object for the DiT model.
-        **overrides (Any): Arbitrary keyword arguments used to override the default configuration.
-
-    Returns:
-        nn.Module: The loaded MultiModalDiT model.
-    """
-    # Apply any overrides to the config before loading
-    cfg = apply_overrides(cfg, overrides)
-
-    print("[INFO] Loading MultiModalDiT model with config:", cfg)
-
-    # Instantiate the MultiModalDiT model
-    model = MultiModalDiT(**cfg.dit)
-    print("[INFO] Loaded DiT")
-    return model
-
-
-def load_diffusion(cfg: DictConfig, dit_model: nn.Module, **overrides: Any) -> nn.Module:
-    """
-    Load a MultiModalDiffusion model based on the provided configuration.
-
-    The config is expected to have a top-level 'diffusion' section containing the parameters
-    for the MultiModalDiffusion. The 'dit_model' argument is required because
-    MultiModalDiffusion depends on a pre-loaded DiT model.
-
-    Args:
-        cfg (DictConfig): The Hydra configuration object (must contain a 'diffusion' section).
-        dit_model (nn.Module): The already loaded DiT model, required by the Diffusion model.
-        **overrides (Any): Arbitrary keyword arguments used to override the default configuration.
-
-    Returns:
-        nn.Module: The loaded MultiModalDiffusion model.
-    """
-    # Apply any overrides to the config before loading
-    cfg = apply_overrides(cfg, overrides)
-
-    print("[INFO] Loading Diffusion model with config:", cfg)
-
-    # Instantiate the Diffusion model, injecting the loaded DiT
-    diffusion_model = MultiModalDiffusion(dit=dit_model, **cfg.diffusion)
-    print("[INFO] Loaded Diffusion Model")
-    return diffusion_model
+from models.diffusion.diffusion_multimodal import load_diffusion
+from models.dit.dit_multimodal import load_dit
+from models.vae.vae import load_vae
 
 
 def load_model(
@@ -124,6 +47,10 @@ def load_model(
     Raises:
         ValueError: If the provided model_type is not supported.
     """
+
+    from utils.configurations import set_project_root
+    set_project_root()
+
     # Clear any existing Hydra initialization to avoid conflicts
     if GlobalHydra.instance().is_initialized():
         GlobalHydra.instance().clear()
@@ -157,33 +84,6 @@ def load_model(
 
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
-
-
-def apply_overrides(cfg: DictConfig, overrides: Dict[str, Any]) -> DictConfig:
-    """
-    Apply keyword argument overrides to the first matching top-level section in the Hydra config.
-
-    For example, if cfg has a section 'vae' or 'dit', and you pass an override with a key
-    'model_name', it will be applied to 'cfg.vae.model_name' or 'cfg.dit.model_name' if found.
-
-    Args:
-        cfg (DictConfig): The original Hydra configuration object.
-        overrides (Dict[str, Any]): A dictionary of overrides, where each key-value pair should
-            match an existing field in the top-level sections of the config.
-
-    Returns:
-        DictConfig: The updated configuration after applying overrides.
-
-    Raises:
-        KeyError: If an override key does not exist in any top-level section.
-    """
-    for key, value in overrides.items():
-        for parent_key, section in cfg.items():
-            # We only apply overrides to top-level DictConfig sections
-            if isinstance(section, DictConfig) and key in section:
-                section[key] = value
-                break
-    return cfg
 
 
 if __name__ == "__main__":
