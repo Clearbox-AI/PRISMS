@@ -6,7 +6,7 @@ defaults:
 execution_params:
   dit_checkpoint: "/mnt/storage/nacc_sub/mm_dit_con_vae/checkpoints/checkpoint_step_24000_final.pt"
   batch_size: 4
-  num_batches: 1
+  num_batches: 100
   device: "cuda"
 
 distributed:

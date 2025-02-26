@@ -31,3 +31,17 @@ def load_vae(cfg: DictConfig, **overrides: Any) -> nn.Module:
     )
     print(f"[INFO] Loaded VAE: {cfg.vae.model_name}")
     return vae
+
+def encode_images(model: nn.Module, images: torch.Tensor, scaling_factor: float) -> torch.Tensor:
+    with torch.no_grad():
+        latents_dist = model.encode(images)
+        latents = latents_dist.latent_dist.sample() * scaling_factor
+
+        return latents
+
+def decode_latents(model: nn.Module, latents: torch.Tensor, scaling_factor) -> torch.Tensor:
+    with torch.no_grad():
+        decoded_imgs = model.decode(latents / scaling_factor).sample
+        decoded_imgs = (decoded_imgs * 0.5 + 0.5).clamp(0, 1)
+
+        return decoded_imgs

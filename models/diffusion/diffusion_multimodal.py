@@ -237,7 +237,7 @@ class MultiModalDiffusion(nn.Module):
         final_latents = x_next.float()
 
         # File I/O only on main process (rank 0) to avoid collisions in DDP
-        if save_path is not None and is_main_process():
+        if save_path and is_main_process():
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             latents_for_vis = (final_latents - final_latents.min()) / (
                 final_latents.max() - final_latents.min() + 1e-7

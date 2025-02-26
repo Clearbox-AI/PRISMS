@@ -1,8 +1,10 @@
 defaults:
+  - ../../configs/default_project@_global_
   - ../models/dit@_global_
   - ../models/vae@_global_
   - ../datasets/nacc@_global_
   - _self_
+
 
 dit:
   # base input settings
@@ -40,7 +42,7 @@ data:
   image_width: 512
   target_channels: 3
   # dataloader
-  batch_size: 4
+  batch_size: 8
   num_workers: 0
   # processing
   do_image_normalize: true
@@ -59,20 +61,26 @@ diffusion:
   train_mask_ratio: 0.0
 
 training:
-
+  # diffusion model
   device: "cuda"
   sample_batch_size: 4
   latent_reg_weight: 0.01
+  # hyperparameters
+  epochs: 800
+  save_model_interval: 2
+  lr: 1.5e-4
+  # sampling
+  sample_conditioning: 1.0
+  sample_steps: 20
+  sample_latents_path: ""
+  sample_interval: 2
+  # logging/saving
+  log_interval: 10
+  base_save_path: "/mnt/storage/nacc_sub/dit"
+  save_label: "" # if you need to add a certain label to the model output path, other than the date
+  resume_training: true
+  resume_checkpoint_dir: "/mnt/storage/nacc_sub/dit/2025-02-26_13-08-42"
 
-#  epochs: 800
-#  lr: 1.5e-4
-
-#  batch_size: 8
-#  num_workers: 0
-#  uncond_prob: 0 #0.2
-
-#  log_interval: 10
-#  sample_interval: 100
-#  sample_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/samples"
-#  save_model_interval: 2000
-#  model_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/checkpoints"
+distributed:
+  use_ddp: false
+  backend: nccl

@@ -9,6 +9,8 @@ from monai.transforms import (
     RandGaussianNoise, RandBiasField, RandAdjustContrast
 )
 from sklearn.preprocessing import StandardScaler
+from typing import Optional, Union
+from pathlib import Path
 
 from data.base_dataset import BaseNaccDataset
 from enums.data import ImageRange
@@ -31,7 +33,7 @@ class NaccDataset(BaseNaccDataset):
                  target_channels: int = 3,
                  final_image_range: ImageRange = "none",
                  debug: bool = False,
-                 stats_file: str = None  # path to JSON with precomputed stats
+                 stats_file: Optional[Union[Path, str]] = None  # path to JSON with precomputed stats
                  ):
         super().__init__(data_dir=data_dir, debug=debug)
 

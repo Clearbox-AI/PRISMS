@@ -1,7 +1,7 @@
 data:
   # locations
   data_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
-  stats_file: "/home/PRISMS/data/computations/nacc_stats.json"
+  stats_file: "" #"..data/computations/nacc_stats.json"
   # dimensions
   image_height: 512
   image_width: 512

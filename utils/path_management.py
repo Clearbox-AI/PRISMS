@@ -1,9 +1,9 @@
 import os
 import datetime
-from typing import Optional
+from typing import Optional, Union
 from pathlib import Path
 
-def setup_exp_directory(base_path: str, label: Optional[str] = None) -> Path:
+def setup_storage_directory(base_path: Union[Path, str], label: Optional[str] = None) -> Path:
     """
     Checks if `base_path` exists, creates it if not, then creates a date-based
     subfolder for saving results.

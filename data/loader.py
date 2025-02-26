@@ -1,3 +1,4 @@
+import os
 import json
 import numpy as np
 import torch.distributed as dist
@@ -6,14 +7,13 @@ import glob
 
 from torch.utils.data import DataLoader, DistributedSampler
 from sklearn.preprocessing import StandardScaler
-
-from data.nacc_dataset import NaccDataset
-from enums.data import DatasetType, ImageRange
-
-import os
+from typing import Union
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
+
+from data.nacc_dataset import NaccDataset
+from enums.data import DatasetType, ImageRange
 
 
 
@@ -28,7 +28,8 @@ def load_training_data(cfg: DictConfig) -> DataLoader:
     if cfg.data.dataset_type.lower() == DatasetType.NACC.value:
         # Step 1: Check if we need to precompute stats
         data_dir = cfg.data.data_dir
-        stats_path = cfg.data.stats_file
+        stats_dir = cfg.data.get("stats_file") or Path(Path(__file__).resolve().parent, "computations")
+        stats_path = Path(stats_dir, "nacc_stats.json")
         compute_dataset_stats(data_dir, stats_path)
 
         # Step 2: Create the dataset (the dataset will load stats from stats_path)
@@ -79,7 +80,7 @@ def load_training_data(cfg: DictConfig) -> DataLoader:
     return loader
 
 
-def compute_dataset_stats(data_dir: str, stats_path: str):
+def compute_dataset_stats(data_dir: Union[Path, str], stats_path: Union[Path, str]):
     """
     Checks if 'stats_path' already exists.
     - If it does NOT exist, compute stats from 'data_dir' and write them to stats_path.
