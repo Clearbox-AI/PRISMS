@@ -19,58 +19,58 @@ from enums.training_versions import DiTTrainingVersion
 @hydra.main(version_base=None, config_path="../../configs/experiments", config_name="vae_vs_dit_dist")
 def main(cfg: DictConfig):
 
-    # # --------------------
-    # # 1) Build or load models
-    # # --------------------
-    # vae = load_model(model_type=ModelType.VAE)
-    # vae.requires_grad_(False)
-    # vae.eval()
-    # vae.to(device=cfg.execution_params.device)
-    #
-    # mm_diff_model = load_model(
-    #     model_type=ModelType.DIFFUSION,
-    #     model_variant=DiTTrainingVersion.base_dit_training
-    # )
-    # mm_diff_model.to(cfg.execution_params.device)
-    #
-    # # If the Diffusion model internally holds a DiT, extract it.
-    # dit_model = mm_diff_model.dit
-    # dit_model.to(cfg.execution_params.device)
-    #
-    # # --------------------
-    # # 2) Load checkpoint
-    # # --------------------
-    # checkpoint_path = cfg.execution_params.dit_checkpoint
-    # load_checkpoint(mm_diff_model, checkpoint_path, cfg.execution_params.device)
-    # mm_diff_model.eval()
-    #
-    # # --------------------
-    # # 3) Generate latents
-    # # --------------------
-    # num_batches = cfg.execution_params.num_batches
-    # all_generated_latents = []
-    #
-    # print("\nGenerating latents...")
-    # with torch.no_grad():
-    #     for _ in tqdm(range(num_batches), desc="Generating", unit="batch"):
-    #         latents, _ = mm_diff_model.sample(
-    #             batch_size=cfg.execution_params.batch_size,
-    #             table_data=torch.randn(cfg.execution_params.batch_size, 174, device=cfg.execution_params.device),
-    #             cfg=1.0,
-    #             steps=None,
-    #             height=64,
-    #             width=64,
-    #             device=cfg.execution_params.device,
-    #             save_path=None
-    #         )
-    #         all_generated_latents.append(latents)
-    #
-    # generated_latents = torch.cat(all_generated_latents, dim=0)  # (N, C, H, W)
-    #
-    # # --------------------
-    # # 4) Collect Original latents
-    # # --------------------
-    # all_original_latents = []
+    # --------------------
+    # 1) Build or load models
+    # --------------------
+    vae = load_model(model_type=ModelType.VAE)
+    vae.requires_grad_(False)
+    vae.eval()
+    vae.to(device=cfg.execution_params.device)
+
+    mm_diff_model = load_model(
+        model_type=ModelType.DIFFUSION,
+        model_variant=DiTTrainingVersion.base_dit_training
+    )
+    mm_diff_model.to(cfg.execution_params.device)
+
+    # If the Diffusion model internally holds a DiT, extract it.
+    dit_model = mm_diff_model.dit
+    dit_model.to(cfg.execution_params.device)
+
+    # --------------------
+    # 2) Load checkpoint
+    # --------------------
+    checkpoint_path = cfg.execution_params.dit_checkpoint
+    load_checkpoint(mm_diff_model, checkpoint_path, cfg.execution_params.device)
+    mm_diff_model.eval()
+
+    # --------------------
+    # 3) Generate latents
+    # --------------------
+    num_batches = cfg.execution_params.num_batches
+    all_generated_latents = []
+
+    print("\nGenerating latents...")
+    with torch.no_grad():
+        for _ in tqdm(range(num_batches), desc="Generating", unit="batch"):
+            latents, _ = mm_diff_model.sample(
+                batch_size=cfg.execution_params.batch_size,
+                table_data=torch.randn(cfg.execution_params.batch_size, 174, device=cfg.execution_params.device),
+                cfg=1.0,
+                steps=None,
+                height=64,
+                width=64,
+                device=cfg.execution_params.device,
+                save_path=None
+            )
+            all_generated_latents.append(latents)
+
+    generated_latents = torch.cat(all_generated_latents, dim=0)  # (N, C, H, W)
+
+    # --------------------
+    # 4) Collect Original latents
+    # --------------------
+    all_original_latents = []
     train_loader = load_training_data(cfg)
 
     print("\nCollecting original latents...")
