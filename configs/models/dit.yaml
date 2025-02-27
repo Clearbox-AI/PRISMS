@@ -1,0 +1,29 @@
+dit:
+  # base input settings
+  input_size: 64
+  patch_size: 2
+  in_channels: 4
+  dim: 512
+  depth: 6
+  head_dim: 64
+  multiple_of: 256
+  qkv_multipliers: [1.0]
+  ffn_multipliers: [4.0]
+  norm_eps: 1e-6
+  depth_init: True
+  use_bias: True
+  # tabular settings
+  num_tab_columns: 174
+  tab_groups: 10
+  out_table_features: 174
+  # Patch mixer
+  use_patch_mixer: False
+  patch_mixer_depth: 2
+  patch_mixer_dim: 256
+  patch_mixer_qkv_ratio: 1.0
+  patch_mixer_mlp_ratio: 1.0
+  # Experts (MoE)
+  num_experts: 8
+  expert_capacity: 1.0
+  experts_every_n: 2
+

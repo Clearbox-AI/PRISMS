@@ -1,0 +1,83 @@
+data:
+  dataset_type: "nacc"  #"nacc" "nacc_adapter"
+  data_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice" # "/mnt/dataset_storage/data/nacc_dataset/nacc_dataset_ditvae_adapter" "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
+  batch_size: 4
+  num_workers: 0
+  image_size: 64
+  image_height: 512
+  image_width: 512
+  domain: "mri"               # or "ct"
+  do_augment: false           # set to true if you want data augmentation
+  do_image_normalize: true    # compute global mean/std
+  do_tabular_normalize: true  # standardize tab data
+  debug: false
+
+
+################################################################################
+# VAE parameters
+################################################################################
+vae:
+  model_name: "stabilityai/stable-diffusion-xl-base-1.0" # 3 -> 4 channels
+  model_alias: "sd_xl"
+  subfolder: "vae"
+  dtype: "float32"
+  target_channels: 3 # target for the input for the vae
+  scaling_factor: 0.13025
+
+diffusion:
+  sigma_min: 0.002
+  sigma_max: 20
+  p_mean: -0.6
+  p_std: 1.2
+  sigma_data: 0.9
+  num_steps: 18
+  train_mask_ratio: 0.0  # Only if needed
+
+training:
+  epochs: 800
+  lr: 1.5e-4 #1e-4 # lr ≈ 1.41e-4 2gpu, lr ≈ 2e-4 4gpu
+  device: "cuda"
+  batch_size: 8
+  num_workers: 0
+  uncond_prob: 0 #0.2
+  latent_reg_weight: 0.01
+  log_interval: 10
+  sample_interval: 100
+  sample_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/samples"
+  save_model_interval: 2000
+  model_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/checkpoints"
+
+  # for resuming training
+  resume: False
+  resume_checkpoint_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/checkpoints"
+
+adapter:
+  in_channels: 4
+  hidden_dim: 128
+  num_blocks: 2
+
+  use_tis_dit: "/mnt/storage/nacc_sub/mm_dit_con_vae_800/checkpoints/checkpoint_step_24000_final.pt"
+  learnable_weight: True
+  fixed_alpha: 0.7
+  lr: 1e-4
+  sample_interval: 50
+  epochs: 250
+  log_interval: 10
+  save_model_interval: 100000
+  model_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/adapter"
+  checkpoint: "/mnt/storage/nacc_sub/mm_dit_con_vae/checkpoints/checkpoint_step_15000_final.pt"
+  sample_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/adapter"
+
+#  in_channels: 4,  # 4 if latents are 4 channels
+  nce_embed_dim: 128  # e.g. 128
+  nce_patch_size: 8  # e.g. 8
+  nce_num_patches: 64   # e.g. 64
+  nce_temperature: 0.07    # e.g. 0.07
+
+
+distributed:
+  use_ddp: true
+  backend: nccl
+
+exp:
+  use_adapter: True

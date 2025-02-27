@@ -1,0 +1,9 @@
+vae:
+  model_name: "stabilityai/stable-diffusion-xl-base-1.0"  # 3 -> 4 channels
+  model_alias: "sd_xl"
+  subfolder: "vae"
+  dtype: "float32"
+  target_channels: 3  # target for the input for the vae
+  scaling_factor: 0.13025
+
+
