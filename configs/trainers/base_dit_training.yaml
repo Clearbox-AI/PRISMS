@@ -8,13 +8,13 @@ defaults:
 
 dit:
   # base input settings
-  input_size: 64
-  patch_size: 4
+  input_size: 32
+  patch_size: 2
   in_channels: 4
-  dim: 512
-  depth: 20
-  head_dim: 32
-  multiple_of: 256
+  dim: 128
+  depth: 32
+  head_dim: 64
+  multiple_of: 128
   qkv_multipliers: [1.0]
   ffn_multipliers: [4.0]
   norm_eps: 1e-6
@@ -25,24 +25,25 @@ dit:
   tab_groups: 10
   out_table_features: 174
   # Patch mixer
-  use_patch_mixer: False
+  use_patch_mixer: true
   patch_mixer_depth: 4
   patch_mixer_dim: 512
   patch_mixer_qkv_ratio: 1.0
   patch_mixer_mlp_ratio: 4.0
   # Experts (MoE)
-  num_experts: 8
+  num_experts: 12
   expert_capacity: 1.0
-  experts_every_n: 2
+  experts_every_n: 4
 
 data:
   dataset_type: "nacc"
   # dimensions
-  image_height: 512
-  image_width: 512
+  image_size: 32
+  image_height: 256
+  image_width: 256
   target_channels: 3
   # dataloader
-  batch_size: 8
+  batch_size: 32
   num_workers: 0
   # processing
   do_image_normalize: true
@@ -57,30 +58,30 @@ diffusion:
   p_mean: -0.6
   p_std: 1.2
   sigma_data: 0.9
-  num_steps: 18
+  num_steps: 5
   train_mask_ratio: 0.0
+  latent_reg_weight: 0.01
 
 training:
   # diffusion model
   device: "cuda"
   sample_batch_size: 4
-  latent_reg_weight: 0.01
   # hyperparameters
-  epochs: 800
-  save_model_interval: 2
-  lr: 1.5e-4
+  epochs: 2500
+  save_model_interval: 5000
+  lr: 2e-4 #1.5e-4
   # sampling
   sample_conditioning: 1.0
   sample_steps: 20
   sample_latents_path: ""
-  sample_interval: 2
+  sample_interval: 200
   # logging/saving
   log_interval: 10
   base_save_path: "/mnt/storage/nacc_sub/dit"
-  save_label: "" # if you need to add a certain label to the model output path, other than the date
-  resume_training: true
-  resume_checkpoint_dir: "/mnt/storage/nacc_sub/dit/2025-02-26_13-08-42"
+  save_label: "256_dim128_head64" # if you need to add a certain label to the model output path, other than the date
+  resume_training: false
+  resume_checkpoint_dir: ""
 
 distributed:
-  use_ddp: false
+  use_ddp: true
   backend: nccl

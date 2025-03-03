@@ -73,7 +73,8 @@ def resume_from_checkpoint(
 
     start_epoch = ckpt.get('epoch', 0)
     global_step = ckpt.get('step', 0)
-    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    if optimizer:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     raw_model_state_dict = ckpt["model_state_dict"]
     # If the state_dict was saved from a DDP model, remove prefix
     sd = strip_ddp_prefix(raw_model_state_dict, "module")

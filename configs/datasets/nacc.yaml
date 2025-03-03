@@ -3,6 +3,7 @@ data:
   data_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
   stats_file: "" #"..data/computations/nacc_stats.json"
   # dimensions
+  image_size: 64
   image_height: 512
   image_width: 512
   target_channels: 3

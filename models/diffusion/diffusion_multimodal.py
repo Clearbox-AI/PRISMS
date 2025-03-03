@@ -13,6 +13,7 @@ from hydra import compose, initialize_config_dir
 from utils.ddp import is_main_process
 from utils.configurations import apply_overrides
 from models.dit.dit_multimodal import load_dit
+import random
 
 
 class MultiModalDiffusion(nn.Module):
@@ -73,13 +74,13 @@ class MultiModalDiffusion(nn.Module):
         self.train_mask_ratio = train_mask_ratio
         self.latent_reg_weight = latent_reg_weight
 
-    def forward(self, images: torch.Tensor, table_data: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    def forward(self, images: torch.Tensor, table_data: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Perform a forward pass to compute the EDM loss.
 
         Args:
             images (torch.Tensor): The real image tensors of shape (B, C, H, W).
-            table_data (torch.Tensor, optional): Tabular data of shape (B, T) or similar.
+            table_data (torch.Tensor): Tabular data of shape (B, T) or similar.
 
         Returns:
             (total_loss, image_loss, tab_loss) as a tuple of:
@@ -87,64 +88,104 @@ class MultiModalDiffusion(nn.Module):
                 - image_loss (torch.Tensor): image-only diffusion loss
                 - tab_loss (Optional[torch.Tensor]): table-only diffusion loss (if table data is provided)
         """
+
         device = images.device
         B = images.shape[0]
 
-        # 1) Sample sigma from a log-normal distribution
+        # ------------------------------------------------
+        # 1) Sample log-normal noise scale for images
+        # ------------------------------------------------
         rnd_normal = torch.randn([B, 1, 1, 1], device=device)
-        sigma = (rnd_normal * self.p_std + self.p_mean).exp()
+        sigma_img = (rnd_normal * self.p_std + self.p_mean).exp()  # shape [B,1,1,1]
 
-        # 2) Compute the weight
-        weight = ((sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data)**2)
+        # EDM weighting factor
+        weight_img = ((sigma_img ** 2 + self.sigma_data ** 2) / (sigma_img * self.sigma_data) ** 2)
 
-        # 3) Add noise to input
-        noise = torch.randn_like(images)
-        noised_input = images + sigma * noise
+        # Add noise to images
+        noise_img = torch.randn_like(images)
+        noised_images = images + sigma_img * noise_img
 
-        # 4) EDM scaling
-        sigma_in = sigma.reshape(-1, 1, 1, 1)
-        c_in = 1.0 / (self.sigma_data**2 + sigma_in**2).sqrt()
-        c_skip = self.sigma_data**2 / (sigma_in**2 + self.sigma_data**2)
-        c_out = sigma_in * self.sigma_data / (sigma_in**2 + self.sigma_data**2).sqrt()
-        t = (sigma_in.log() / 4.0).squeeze()
+        # Decide if we do "joint" or "conditional" for the table:
+        # (We always have a real table_data, but we may or may not add noise.)
+        do_joint = (random.random() < 1)
+        if do_joint:
+            # Full joint mode => same sigma as images
+            sigma_tab = sigma_img.view(B, 1)  # shape [B,1]
+        else:
+            # Conditional mode => "sigma=0" => keep table clean
+            sigma_tab = torch.zeros_like(sigma_img.view(B, 1))
 
-        # 5) Forward pass through the model
+        # Prepare table noise
+        noise_tab = torch.randn_like(table_data)
+        noised_table = table_data + sigma_tab * noise_tab
+
+        # EDM weighting factor for table
+        weight_tab = ((sigma_tab ** 2 + self.sigma_data ** 2) / (sigma_tab * self.sigma_data) ** 2)
+        # Avoid division by zero if sigma_tab=0 => set weight_tab=1 when in conditional mode
+        # or do it more carefully with .where() logic:
+        weight_tab = torch.where(sigma_tab > 1e-8, weight_tab, torch.ones_like(weight_tab))
+
+        # ------------------------------------------------
+        # 2) EDM scaling for images
+        # ------------------------------------------------
+        c_in_img = 1.0 / (self.sigma_data ** 2 + sigma_img ** 2).sqrt()
+        c_skip_img = self.sigma_data ** 2 / (sigma_img ** 2 + self.sigma_data ** 2)
+        c_out_img = sigma_img * self.sigma_data / (sigma_img ** 2 + self.sigma_data ** 2).sqrt()
+        t_img = (sigma_img.log() / 4.0).squeeze()  # shape (B,)
+
+        # EDM scaling for table
+        c_in_tab = 1.0 / (self.sigma_data ** 2 + sigma_tab ** 2).sqrt()
+        c_skip_tab = self.sigma_data ** 2 / (sigma_tab ** 2 + self.sigma_data ** 2)
+        c_out_tab = sigma_tab * self.sigma_data / (sigma_tab ** 2 + self.sigma_data ** 2).sqrt()
+
+        # ------------------------------------------------
+        # 3) Forward pass in the model
+        # ------------------------------------------------
+        # We pass scaled/noised images & scaled/noised table
         out = self.dit(
-            x_img=c_in * noised_input,
-            t=t,
-            tab=table_data,
-            cfg=1.0,  # CFG not typically used during training
+            x_img=c_in_img * noised_images,
+            t=t_img,
+            tab=c_in_tab * noised_table,
+            cfg=1.0,
             mask_ratio=self.train_mask_ratio
         )
-        F_x = out['image_sample']
 
-        # Combine for denoised prediction
-        D_xn = c_skip * noised_input + c_out * F_x
-        loss_img = weight * ((D_xn - images) ** 2)
-        image_loss = loss_img.mean(dim=[1, 2, 3]).mean()
+        # The model must return out["image_sample"] & out["table_sample"]
+        pred_img = out["image_sample"]  # shape (B, C, H, W)
+        pred_tab = out["table_sample"]  # shape (B, T)
+
+        # ------------------------------------------------
+        # 4) "Denoised" final predictions via EDM formula
+        # ------------------------------------------------
+        # For images
+        denoised_img = c_skip_img * noised_images + c_out_img * pred_img
+        # For tables
+        denoised_tab = c_skip_tab * noised_table + c_out_tab * pred_tab
+
+        # ------------------------------------------------
+        # 5) MSE Loss vs. ground truth
+        # ------------------------------------------------
+        # Image loss
+        img_loss_val = weight_img * ((denoised_img - images) ** 2)
+        image_loss = img_loss_val.mean(dim=[1, 2, 3]).mean()
 
         # Optional latent regularization
         if self.latent_reg_weight > 0:
             real_mean = images.mean(dim=(0, 2, 3), keepdim=True)
             real_std = images.std(dim=(0, 2, 3), keepdim=True)
-            pred_mean = F_x.mean(dim=(0, 2, 3), keepdim=True)
-            pred_std = F_x.std(dim=(0, 2, 3), keepdim=True)
-            mean_loss = F.mse_loss(pred_mean, real_mean)
-            std_loss = F.mse_loss(pred_std, real_std)
-            reg_loss = mean_loss + std_loss
+            pred_mean = pred_img.mean(dim=(0, 2, 3), keepdim=True)
+            pred_std = pred_img.std(dim=(0, 2, 3), keepdim=True)
+            reg_loss = F.mse_loss(pred_mean, real_mean) + F.mse_loss(pred_std, real_std)
             image_loss = image_loss + self.latent_reg_weight * reg_loss
 
-        # Optional table loss
-        tab_loss = None
-        if torch.is_tensor(table_data):
-            pred_tab = out['table_sample']
-            tab_loss_val = F.mse_loss(pred_tab, table_data, reduction='none').mean(dim=1)
-            tab_loss = tab_loss_val.mean()
-            total_loss = image_loss + tab_loss
-        else:
-            total_loss = image_loss
+        # Table loss
+        tab_loss_val = weight_tab * ((denoised_tab - table_data) ** 2)  # shape [B, T]
+        table_loss = tab_loss_val.mean()
 
-        return total_loss, image_loss, tab_loss
+        # Weighted sum
+        total_loss = image_loss + 0.7 * table_loss
+
+        return total_loss, image_loss, table_loss
 
     @torch.no_grad()
     def sample(
@@ -169,82 +210,143 @@ class MultiModalDiffusion(nn.Module):
             final_latents (torch.Tensor): The final latents of shape (B, C, H, W).
             latest_tab_sample (Optional[torch.Tensor]): The final predicted table sample if available.
         """
+
         self.eval()
         steps = steps or self.num_steps
-        c = self.dit.in_channels
+        c = self.dit.in_channels  # e.g. 3 or 4 for images
 
-        # Start from pure noise
-        x = torch.randn((batch_size, c, height, width), device=device)
+        # 1) Image latents start from random noise
+        x_img = torch.randn(batch_size, c, height, width, device=device, dtype=torch.float64)
+
+        # 2) Table latents: if None => unconditional => random noise; else => "clean condition"
+        if table_data is None:
+            # We'll generate the table from noise
+            table_in_dim = 174
+            x_tab = torch.randn(batch_size, table_in_dim, device=device, dtype=torch.float64)
+            table_is_uncond = True
+        else:
+            # We'll treat the table as condition => effectively sigma=0 => no random variation
+            x_tab = table_data.to(device).double()
+            table_is_uncond = False
+
+        # Create time schedule
         t_vals = self.create_edm_timesteps(steps, device)
-        x_next = x.double() * t_vals[0]
-        latest_tab_sample = None
-
-        def model_forward(
-                x_in: torch.Tensor, t_sigma: torch.Tensor, tab_data: Optional[torch.Tensor], cfg_val: float
-        ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-            """
-            Internal utility function to run the underlying model forward with the EDM scaling.
-            """
-            B = x_in.shape[0]
-            sigma_in = t_sigma.reshape(-1, 1, 1, 1).float()
-            c_in = 1.0 / (sigma_in**2 + self.sigma_data**2).sqrt()
-            c_skip = self.sigma_data**2 / (sigma_in**2 + self.sigma_data**2)
-            c_out = sigma_in * self.sigma_data / (sigma_in**2 + self.sigma_data**2).sqrt()
-
-            t_embed = (sigma_in.log() / 4.0).reshape(-1)
-            if t_embed.numel() == 1 and B > 1:
-                t_embed = t_embed.expand(B)
-
-            out = self.dit(
-                x_img=c_in * x_in.float(),
-                t=t_embed,
-                tab=tab_data,
-                cfg=cfg_val,
-                mask_ratio=0.0
-            )
-            Fx = out['image_sample'].float()
-            tab_sample = out.get('table_sample', None)
-            denoised = c_skip * x_in + c_out * Fx
-            return denoised, tab_sample
+        # Start from the largest sigma
+        x_img = x_img * t_vals[0]
+        if table_is_uncond:
+            x_tab = x_tab * t_vals[0]
 
         # Sampler loop
+        x_img_next = x_img
+        x_tab_next = x_tab
+
         for i, (t_cur, t_next) in enumerate(zip(t_vals[:-1], t_vals[1:])):
-            x_cur = x_next
-            gamma = (min(self.s_churn / steps, np.sqrt(2) - 1)
+            x_i = x_img_next
+            x_t = x_tab_next
+
+            # s_churn
+            gamma = (min(self.s_churn / steps, (2 ** 0.5) - 1)
                      if (self.s_min <= t_cur <= self.s_max) else 0.0)
             t_hat = t_cur + gamma * t_cur
-            x_hat = x_cur + (t_hat**2 - t_cur**2).sqrt() * self.s_noise * torch.randn_like(x_cur)
 
-            # Euler step
-            denoised, tab_sample = model_forward(x_hat, t_hat, table_data, cfg)
-            denoised = denoised.double()
-            if tab_sample is not None:
-                tab_sample = tab_sample.double()
-                latest_tab_sample = tab_sample.detach().cpu()
-            d_cur = (x_hat - denoised) / t_hat
-            x_next = x_hat + (t_next - t_hat) * d_cur
+            # Add noise (stochasticity)
+            x_i_hat = x_i + (t_hat ** 2 - t_cur ** 2).sqrt() * self.s_noise * torch.randn_like(x_i)
+            if table_is_uncond:
+                x_t_hat = x_t + (t_hat ** 2 - t_cur ** 2).sqrt() * self.s_noise * torch.randn_like(x_t)
+            else:
+                x_t_hat = x_t
 
-            # 2nd order correction
+            # ---- First pass / Euler step ----
+            x_img_denoised, x_tab_denoised = self.model_forward_edm(x_i_hat, x_t_hat, t_hat, cfg, table_is_uncond)
+            d_cur_img = (x_i_hat - x_img_denoised) / t_hat
+            x_img_next = x_i_hat + (t_next - t_hat) * d_cur_img
+
+            d_cur_tab = None
+            if x_tab_denoised is not None:
+                d_cur_tab = (x_t_hat - x_tab_denoised) / t_hat
+                x_tab_next = x_t_hat + (t_next - t_hat) * d_cur_tab
+
+            # ---- Second pass / Heun correction ----
             if i < steps - 1:
-                denoised2, tab_sample2 = model_forward(x_next, t_next, table_data, cfg)
-                denoised2 = denoised2.double()
-                if tab_sample2 is not None:
-                    tab_sample2 = tab_sample2.double()
-                    latest_tab_sample = tab_sample2.detach().cpu()
-                d_prime = (x_next - denoised2) / t_next
-                x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
+                x_img_denoised2, x_tab_denoised2 = self.model_forward_edm(x_img_next, x_tab_next, t_next, cfg,
+                                                                          table_is_uncond)
 
-        final_latents = x_next.float()
+                d_prime_img = (x_img_next - x_img_denoised2) / t_next
+                x_img_next = x_i_hat + (t_next - t_hat) * 0.5 * (d_cur_img + d_prime_img)
 
-        # File I/O only on main process (rank 0) to avoid collisions in DDP
-        if save_path and is_main_process():
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            latents_for_vis = (final_latents - final_latents.min()) / (
-                final_latents.max() - final_latents.min() + 1e-7
-            )
-            save_image(latents_for_vis, save_path, nrow=int(batch_size**0.5))
+                if x_tab_denoised2 is not None and d_cur_tab is not None:
+                    d_prime_tab = (x_tab_next - x_tab_denoised2) / t_next
+                    x_tab_next = x_t_hat + (t_next - t_hat) * 0.5 * (d_cur_tab + d_prime_tab)
 
-        return final_latents, latest_tab_sample
+        final_imgs = x_img_next.float()
+        final_tabs = x_tab_next.float()  # always produce a final table
+
+        return final_imgs, final_tabs
+
+    def model_forward_edm(
+            self,
+            x_img_in: torch.Tensor,
+            x_tab_in: torch.Tensor,
+            sigma_val: float,
+            cfg_val: float,
+            table_is_uncond: bool
+    ):
+        """
+        Single step of EDM scaling and forward pass. We unify image+table:
+          - If table_is_uncond=True => apply same sigma to table
+          - Otherwise => treat table as condition => effectively sigma=0
+        """
+        B = x_img_in.shape[0]
+        sigma_img = torch.full((B, 1, 1, 1), sigma_val, device=x_img_in.device, dtype=torch.float32)
+
+        # EDM factors for images
+        c_in = 1.0 / (sigma_img ** 2 + self.sigma_data ** 2).sqrt()
+        c_skip = self.sigma_data ** 2 / (sigma_img ** 2 + self.sigma_data ** 2)
+        c_out = sigma_img * self.sigma_data / (sigma_img ** 2 + self.sigma_data ** 2).sqrt()
+        t_embed = (sigma_img.log() / 4.0).view(-1)
+
+        if table_is_uncond:
+            # Table has same sigma
+            sigma_tab = torch.full((B, 1), sigma_val, device=x_tab_in.device, dtype=torch.float32)
+            c_in_tab = 1.0 / (sigma_tab ** 2 + self.sigma_data ** 2).sqrt()
+            c_skip_tab = self.sigma_data ** 2 / (sigma_tab ** 2 + self.sigma_data ** 2)
+            c_out_tab = sigma_tab * self.sigma_data / (sigma_tab ** 2 + self.sigma_data ** 2).sqrt()
+        else:
+            # Clean table => sigma=0 => skip
+            c_in_tab = None
+            c_skip_tab = None
+            c_out_tab = None
+
+        # Scale inputs
+        x_img_scaled = c_in * x_img_in.float()
+        if table_is_uncond:
+            x_tab_scaled = c_in_tab * x_tab_in.float()
+        else:
+            x_tab_scaled = x_tab_in.float()
+
+        out = self.dit(
+            x_img=x_img_scaled,
+            t=t_embed,
+            tab=x_tab_scaled,
+            cfg=cfg_val,
+            mask_ratio=0.0
+        )
+        Fx_img = out["image_sample"].float()
+        Fx_tab = out.get("table_sample", None)
+
+        # "denoised" outputs
+        denoised_img = c_skip * x_img_in + c_out * Fx_img
+
+        denoised_tab = None
+        if Fx_tab is not None:
+            if table_is_uncond:
+                denoised_tab = c_skip_tab * x_tab_in + c_out_tab * Fx_tab
+            else:
+                # Even in conditional mode, we can still produce a table output,
+                # but it won't differ much from x_tab_in if sigma=0
+                denoised_tab = x_tab_in
+
+        return denoised_img, denoised_tab
 
     def create_edm_timesteps(self, steps: int, device: torch.device) -> torch.Tensor:
         """

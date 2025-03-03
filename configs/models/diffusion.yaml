@@ -6,3 +6,4 @@ diffusion:
   sigma_data: 0.9
   num_steps: 18
   train_mask_ratio: 0.0
+  latent_reg_weight: 0.0

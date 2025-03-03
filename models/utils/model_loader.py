@@ -73,7 +73,7 @@ def load_model(
 
         dit_model = load_dit(cfg, **overrides)
 
-        if model_type == ModelType.DIFFUSION:
+        if model_type == ModelType.DIFFUSION: #TODO: dovrei passare training, non solo diff. Forse modificare in overrides
             with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
                 cfg = compose(config_name="diffusion")
 
