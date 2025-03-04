@@ -1,0 +1,6 @@
+FID:
+  enabled: true
+  batch_size: 32
+  cache_key_real: "fid_features_real"
+  cache_key_synth: "fid_features_synth"
+  model_path: "path/to/inception_v3.pth"

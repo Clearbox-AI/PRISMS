@@ -57,7 +57,7 @@ def main():
         start_epoch = 0
         global_step = 0
         resume_from_checkpoint(
-                resume_dir="/mnt/storage/nacc_sub/dit/2025-02-27_19-22-13",
+                resume_dir="/mnt/storage/nacc_sub/dit/2025-03-03_07-45-21_256_dim128_head64_joint50",
                 model=mm_diff_model,
                 optimizer=None,
                 device=device,
@@ -87,10 +87,10 @@ def main():
             )
             # Now decode latents -> images
             decoded_imgs = decode_latents(vae, sampled_latents, 0.13025)
-            save_images("/mnt/storage/nacc_sub/dit/2025-02-27_19-22-13", decoded_imgs, "aaaaaaaaaaaaaaa")
+            save_images("/mnt/storage/nacc_sub/dit/2025-03-03_07-45-21_256_dim128_head64_joint50", decoded_imgs, "aaaaaaaaaaaaaaa")
 
             if cond_tab_out is not None:
-                save_tabulars("/mnt/storage/nacc_sub/dit/2025-02-27_19-22-13", cond_tab_out, "aaaaaaaaaaaaaaa")
+                save_tabulars("/mnt/storage/nacc_sub/dit/2025-03-03_07-45-21_256_dim128_head64_joint50", cond_tab_out, "aaaaaaaaaaaaaaa")
 
 if __name__ == "__main__":
     main()
