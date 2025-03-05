@@ -1,0 +1,19 @@
+data:
+  # locations
+  data_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
+  stats_file: "" #"..data/computations/nacc_stats.json"
+  # dimensions
+  image_height: 512
+  image_width: 512
+  target_channels: 3
+  # dataloader
+  batch_size: 4
+  num_workers: 0
+  # processing
+  domain: "mri"
+  final_image_range: "minus1to1"
+  do_image_normalize: true
+  do_tabular_normalize: true
+  do_augment: false
+  # debugging
+  debug: false
