@@ -11,12 +11,12 @@ dit:
   input_size: 32
   patch_size: 2
   in_channels: 4
-  dim: 128
-  depth: 32
-  head_dim: 64
+  dim: 256
+  depth: 24
+  head_dim: 32
   multiple_of: 128
-  qkv_multipliers: [1.0]
-  ffn_multipliers: [4.0]
+  qkv_multipliers: [1.5]
+  ffn_multipliers: [8.0]
   norm_eps: 1e-6
   depth_init: True
   use_bias: True
@@ -27,11 +27,11 @@ dit:
   # Patch mixer
   use_patch_mixer: true
   patch_mixer_depth: 4
-  patch_mixer_dim: 512
+  patch_mixer_dim: 256
   patch_mixer_qkv_ratio: 1.0
   patch_mixer_mlp_ratio: 4.0
   # Experts (MoE)
-  num_experts: 12
+  num_experts: 8
   expert_capacity: 1.0
   experts_every_n: 4
 
@@ -43,7 +43,7 @@ data:
   image_width: 256
   target_channels: 3
   # dataloader
-  batch_size: 32
+  batch_size: 16
   num_workers: 0
   # processing
   do_image_normalize: true
@@ -67,7 +67,7 @@ training:
   device: "cuda"
   sample_batch_size: 4
   # hyperparameters
-  epochs: 2500
+  epochs: 3000
   save_model_interval: 5000
   lr: 2e-4 #1.5e-4
   # sampling
@@ -83,5 +83,5 @@ training:
   resume_checkpoint_dir: ""
 
 distributed:
-  use_ddp: false
+  use_ddp: true
   backend: nccl

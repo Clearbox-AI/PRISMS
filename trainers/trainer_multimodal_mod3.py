@@ -68,23 +68,62 @@ def train_one_epoch(
             with torch.no_grad():
                 # Sample latents (conditional on tab_data)
                 sub_tab = tab_data[:cfg.training.sample_batch_size].to(device)
-                sampled_latents, cond_tab_out = ddp_sample(
-                    model=model,
-                    batch_size=cfg.training.sample_batch_size,
-                    table_data=sub_tab,
-                    cfg=cfg.training.sample_conditioning,
-                    steps=cfg.training.sample_steps,
-                    height=cfg.data.image_size,
-                    width=cfg.data.image_size,
-                    device=device,
-                    save_path=cfg.training.sample_latents_path
-                )
-                # Now decode latents -> images
-                decoded_imgs = decode_latents(vae, sampled_latents, cfg.vae.scaling_factor)
-                save_images(base_save_path, decoded_imgs, global_step)
+                sub_img = images[:cfg.training.sample_batch_size].to(device)
 
-                if cond_tab_out is not None:
-                    save_tabulars(base_save_path, cond_tab_out, global_step)
+                # sampled_latents, cond_tab_out = ddp_sample(
+                #     model=model,
+                #     batch_size=cfg.training.sample_batch_size,
+                #     table_data=sub_tab,
+                #     cfg=cfg.training.sample_conditioning,
+                #     steps=cfg.training.sample_steps,
+                #     height=cfg.data.image_size,
+                #     width=cfg.data.image_size,
+                #     device=device,
+                #     save_path=cfg.training.sample_latents_path
+                # )
+                # # Now decode latents -> images
+                # decoded_imgs = decode_latents(vae, sampled_latents, cfg.vae.scaling_factor)
+                # save_images(base_save_path, decoded_imgs, global_step)
+                #
+                # if cond_tab_out is not None:
+                #     save_tabulars(base_save_path, cond_tab_out, global_step)
+
+                ###########################################################################################
+                # Define sampling configurations
+                sample_configs = [
+                    {
+                        "condition_modality": "none",
+                        "condition_data": None,
+                        "suffix": "uncond"
+                    },
+                    {
+                        "condition_modality": "tab",
+                        "condition_data": sub_tab,
+                        "suffix": "cond_tab"
+                    },
+                    {
+                        "condition_modality": "image",
+                        "condition_data": sub_img,
+                        "suffix": "cond_img"
+                    }
+                ]
+
+                # Perform sampling, decoding, and saving in a loop
+                for config in sample_configs:
+                    latents, tab_data = ddp_sample(
+                        batch_size=cfg.training.sample_batch_size,
+                        device=device,
+                        condition_modality=config["condition_modality"],
+                        condition_data=config["condition_data"],
+                        partial_condition=False
+                    )
+                    suffix = f"{global_step}_{config['suffix']}"
+
+                    # Save images and tabular data
+                    save_images(base_save_path, decode_latents(vae, latents, cfg.vae.scaling_factor), suffix)
+                    save_tabulars(base_save_path, tab_data, suffix)
+
+                ###########################################################################################
 
             model.train()
 

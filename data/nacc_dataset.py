@@ -126,7 +126,8 @@ class NaccDataset(BaseNaccDataset):
 
         return {
             "image": image_tensor,
-            "tabular": tab_tensor
+            "tabular": tab_tensor,
+            "dir": patient_dir
         }
 
     # -------------------------------------------------------------

@@ -16,5 +16,6 @@ data:
   do_image_normalize: true
   do_tabular_normalize: true
   do_augment: false
+  shuffle: True
   # debugging
   debug: false
