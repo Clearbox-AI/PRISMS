@@ -78,7 +78,7 @@ training:
   # logging/saving
   log_interval: 10
   base_save_path: "/mnt/storage/nacc_sub/dit"
-  save_label: "mod_3" # if you need to add a certain label to the model output path, other than the date
+  save_label: "mod_3_alternate" # if you need to add a certain label to the model output path, other than the date
   resume_training: false
   resume_checkpoint_dir: ""
 

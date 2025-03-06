@@ -103,7 +103,7 @@ def train_one_epoch(
                     },
                     {
                         "condition_modality": "image",
-                        "condition_data": sub_img,
+                        "condition_data": encode_images(vae, sub_img, cfg.vae.scaling_factor),
                         "suffix": "cond_img"
                     }
                 ]
@@ -111,6 +111,7 @@ def train_one_epoch(
                 # Perform sampling, decoding, and saving in a loop
                 for config in sample_configs:
                     latents, tab_data = ddp_sample(
+                        model=model,
                         batch_size=cfg.training.sample_batch_size,
                         device=device,
                         condition_modality=config["condition_modality"],

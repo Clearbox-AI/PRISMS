@@ -132,8 +132,8 @@ class MultiModalDiffusion(nn.Module):
         # ------------------------------------------------
         # We pass scaled/noised images & scaled/noised table
         out = self.dit.forward(
-            x_noisy_img=c_in_img * noised_images,  # scaled/noised image
-            x_noisy_tab=c_in_tab * noised_table,  # scaled/noised tab
+            x_img=c_in_img * noised_images,  # scaled/noised image
+            tab=c_in_tab * noised_table,  # scaled/noised tab
             t=t_img,  # same shape (B,)
             mask_ratio=self.train_mask_ratio
         )
@@ -182,9 +182,9 @@ class MultiModalDiffusion(nn.Module):
             partial_noise_factor: float = 0.0,
             cfg: float = 1.0,
             steps: Optional[int] = None,
-            height: int = 64,
-            width: int = 64,
-            tab_n: int = 10,
+            height: int = 32,
+            width: int = 32,
+            tab_n: int = 174,
             batch_size: int = 4,
             device: str = 'cuda'
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -377,8 +377,8 @@ class MultiModalDiffusion(nn.Module):
         x_tab_scaled = c_in_tab * x_tab_in.float()
 
         out = self.dit.forward(
-            x_noisy_img=x_img_scaled,
-            x_noisy_tab=x_tab_scaled,
+            x_img=x_img_scaled,
+            tab=x_tab_scaled,
             t=t_embed,
             mask_ratio=0.0
         )

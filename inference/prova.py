@@ -17,6 +17,7 @@ from utils.model import save_checkpoint, resume_from_checkpoint
 from utils.data import save_images, save_tabulars
 from models.vae.vae import  decode_latents
 from torch import optim
+from models.vae.vae import encode_images, decode_latents
 
 def main():
     """
@@ -57,7 +58,7 @@ def main():
         start_epoch = 0
         global_step = 0
         resume_from_checkpoint(
-                resume_dir="/mnt/storage/nacc_sub/dit/2025-03-03_07-45-21_256_dim128_head64_joint50",
+                resume_dir="/mnt/storage/nacc_sub/dit/2025-03-05_08-33-58_mod_3",
                 model=mm_diff_model,
                 optimizer=None,
                 device=device,
@@ -71,26 +72,88 @@ def main():
         # tab_data = batch['tabular'].to(device, non_blocking=True)
 
         mm_diff_model.eval()
+        # with torch.no_grad():
+        #     # Sample latents (conditional on tab_data)
+        #     # sub_tab = tab_data[:4].to(device)
+        #     sampled_latents, cond_tab_out = ddp_sample(
+        #         model=mm_diff_model,
+        #         batch_size=cfg.training.sample_batch_size,
+        #         table_data=None,
+        #         cfg=cfg.training.sample_conditioning,
+        #         steps=cfg.training.sample_steps,
+        #         height=cfg.data.image_size,
+        #         width=cfg.data.image_size,
+        #         device=device,
+        #         save_path=cfg.training.sample_latents_path
+        #     )
+        #     # Now decode latents -> images
+        #     decoded_imgs = decode_latents(vae, sampled_latents, 0.13025)
+        #     save_images("/mnt/storage/nacc_sub/dit/2025-03-03_07-45-21_256_dim128_head64_joint50", decoded_imgs, "aaaaaaaaaaaaaaa")
+        #
+        #     if cond_tab_out is not None:
+        #         save_tabulars("/mnt/storage/nacc_sub/dit/2025-03-03_07-45-21_256_dim128_head64_joint50", cond_tab_out, "aaaaaaaaaaaaaaa")
+
+
         with torch.no_grad():
             # Sample latents (conditional on tab_data)
-            # sub_tab = tab_data[:4].to(device)
-            sampled_latents, cond_tab_out = ddp_sample(
-                model=mm_diff_model,
-                batch_size=cfg.training.sample_batch_size,
-                table_data=None,
-                cfg=cfg.training.sample_conditioning,
-                steps=cfg.training.sample_steps,
-                height=cfg.data.image_size,
-                width=cfg.data.image_size,
-                device=device,
-                save_path=cfg.training.sample_latents_path
-            )
-            # Now decode latents -> images
-            decoded_imgs = decode_latents(vae, sampled_latents, 0.13025)
-            save_images("/mnt/storage/nacc_sub/dit/2025-03-03_07-45-21_256_dim128_head64_joint50", decoded_imgs, "aaaaaaaaaaaaaaa")
+            images = batch['image'].to(device, non_blocking=True)
+            tab_data = batch['tabular'].to(device, non_blocking=True)
+            sub_tab = tab_data[:4].to(device)
+            sub_img = images[:4].to(device)
 
-            if cond_tab_out is not None:
-                save_tabulars("/mnt/storage/nacc_sub/dit/2025-03-03_07-45-21_256_dim128_head64_joint50", cond_tab_out, "aaaaaaaaaaaaaaa")
+            # sampled_latents, cond_tab_out = ddp_sample(
+            #     model=model,
+            #     batch_size=cfg.training.sample_batch_size,
+            #     table_data=sub_tab,
+            #     cfg=cfg.training.sample_conditioning,
+            #     steps=cfg.training.sample_steps,
+            #     height=cfg.data.image_size,
+            #     width=cfg.data.image_size,
+            #     device=device,
+            #     save_path=cfg.training.sample_latents_path
+            # )
+            # # Now decode latents -> images
+            # decoded_imgs = decode_latents(vae, sampled_latents, cfg.vae.scaling_factor)
+            # save_images(base_save_path, decoded_imgs, global_step)
+            #
+            # if cond_tab_out is not None:
+            #     save_tabulars(base_save_path, cond_tab_out, global_step)
+
+            ###########################################################################################
+            # Define sampling configurations
+            sample_configs = [
+                {
+                    "condition_modality": "none",
+                    "condition_data": None,
+                    "suffix": "uncond"
+                },
+                {
+                    "condition_modality": "tab",
+                    "condition_data": sub_tab,
+                    "suffix": "cond_tab"
+                },
+                {
+                    "condition_modality": "image",
+                    "condition_data": encode_images(vae, sub_img, cfg.vae.scaling_factor),
+                    "suffix": "cond_img"
+                }
+            ]
+
+            # Perform sampling, decoding, and saving in a loop
+            for config in sample_configs:
+                latents, tab_data = ddp_sample(
+                    model=mm_diff_model,
+                    batch_size=cfg.training.sample_batch_size,
+                    device=device,
+                    condition_modality=config["condition_modality"],
+                    condition_data=config["condition_data"],
+                    partial_condition=False
+                )
+                suffix = f"{global_step}_{config['suffix']}"
+
+                # Save images and tabular data
+                save_images("/mnt/storage/nacc_sub/dit/bla", decode_latents(vae, latents, cfg.vae.scaling_factor), suffix)
+                save_tabulars("/mnt/storage/nacc_sub/dit/bla", tab_data, suffix)
 
 if __name__ == "__main__":
     main()
