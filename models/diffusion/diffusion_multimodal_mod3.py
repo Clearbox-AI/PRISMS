@@ -135,7 +135,7 @@ class MultiModalDiffusion(nn.Module):
             x_img=c_in_img * noised_images,  # scaled/noised image
             tab=c_in_tab * noised_table,  # scaled/noised tab
             t=t_img,  # same shape (B,)
-            mask_ratio=self.train_mask_ratio
+            # mask_ratio=self.train_mask_ratio
         )
 
         # The model must return out["image_sample"] & out["table_sample"]
@@ -184,7 +184,7 @@ class MultiModalDiffusion(nn.Module):
             steps: Optional[int] = None,
             height: int = 32,
             width: int = 32,
-            tab_n: int = 174,
+            n_tab: int = 174,
             batch_size: int = 4,
             device: str = 'cuda'
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -216,7 +216,7 @@ class MultiModalDiffusion(nn.Module):
         #     x_tab: (batch_size, tab_n)
         #    Then fill them according to 'condition_modality'.
         x_img = torch.randn(batch_size, c, height, width, device=device, dtype=torch.float64)  # unconditional by default
-        x_tab = torch.randn(batch_size, tab_n, device=device, dtype=torch.float64)  # unconditional by default
+        x_tab = torch.randn(batch_size, n_tab, device=device, dtype=torch.float64)  # unconditional by default
 
         if condition_modality == 'image':
             # => fix or partially fix the image data
@@ -380,7 +380,7 @@ class MultiModalDiffusion(nn.Module):
             x_img=x_img_scaled,
             tab=x_tab_scaled,
             t=t_embed,
-            mask_ratio=0.0
+            # mask_ratio=0.0
         )
         Fx_img = out["image_sample"].float()
         Fx_tab = out["table_sample"].float()
@@ -559,15 +559,15 @@ class MultiModalDiffusion(nn.Module):
                     batch = next(data_iter)
 
                 # Determine the relevant conditional data
-                if condition_modality == 'tab' and 'tab' in batch:
-                    batch_condition_data = batch['tab'][:current_bsz].to(device)
+                if condition_modality == 'tab' and 'tabular' in batch:
+                    batch_condition_data = batch['tabular'][:current_bsz].to(device)
                 elif condition_modality == 'image' and 'image' in batch:
                     batch_condition_data = batch['image'][:current_bsz].to(device)
                 else:
                     batch_condition_data = None
 
                 # Pull out patient directories if they exist; otherwise fill with Nones
-                batch_patient_dirs = batch.get('dir', [None] * current_bsz)
+                batch_patient_dirs = batch.get('dir', [None] * current_bsz)[:current_bsz]
 
                 # Generate samples for this batch
                 imgs_batch, tabs_batch = self.sample(

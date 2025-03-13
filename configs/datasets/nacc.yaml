@@ -3,12 +3,13 @@ data:
   data_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
   stats_file: "" #"..data/computations/nacc_stats.json"
   # dimensions
-  image_size: 64
-  image_height: 512
-  image_width: 512
+  image_size: 32
+  image_height: 256
+  image_width: 256
   target_channels: 3
   # dataloader
-  batch_size: 4
+  dataset_type: "nacc"
+  batch_size: 16
   num_workers: 0
   # processing
   domain: "mri"

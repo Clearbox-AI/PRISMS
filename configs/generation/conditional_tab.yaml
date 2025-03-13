@@ -1,8 +1,0 @@
-generation:
-  n_samples: 1024
-  batch_size: 16
-  modality: 'tab'
-  partial_condition: true
-  partial_noise_factor: 0.25
-  steps: 20
-  cfg_scale: 1.0

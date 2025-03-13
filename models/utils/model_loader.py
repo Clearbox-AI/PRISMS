@@ -11,7 +11,9 @@ from enums.models.model_types import ModelType
 from enums.training_versions import DiTTrainingVersion
 # from models.diffusion.diffusion_multimodal import load_diffusion
 # from models.dit.dit_multimodal import load_dit
-from models.diffusion.diffusion_multimodal_mod3 import load_diffusion
+# from models.diffusion.diffusion_multimodal_mod3 import load_diffusion
+# from models.dit.dit_multimodal_mod3 import load_dit
+from models.diffusion.diffusion_multimodal_new_copy import load_diffusion
 from models.dit.dit_multimodal_mod3 import load_dit
 from models.vae.vae import load_vae
 
