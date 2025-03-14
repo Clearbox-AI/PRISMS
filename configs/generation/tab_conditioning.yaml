@@ -1,0 +1,13 @@
+generation:
+  n_samples: 5
+  batch_size: 16
+  condition_modality: 'tab'
+  partial_condition: false
+  partial_noise_factor: 0.25
+  height: 32
+  width: 32
+  steps: 20
+  cfg_scale: 1.0
+
+  device: "cpu"
+  output_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset_img_from_tab"

@@ -1,0 +1,10 @@
+generation:
+  n_samples: 5000
+  batch_size: 16
+  condition_modality: 'img'
+  partial_condition: true
+  partial_noise_factor: 0.25
+  steps: 20
+  cfg_scale: 1.0
+
+  device: "cuda"
