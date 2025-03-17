@@ -74,7 +74,7 @@ def load_training_data(cfg: DictConfig) -> DataLoader:
         pin_memory=True,
         drop_last=True,
         sampler=sampler,
-        shuffle=(sampler is None)
+        shuffle=sampler is None and cfg.data.shuffle
     )
 
     return loader

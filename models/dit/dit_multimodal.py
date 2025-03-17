@@ -1010,6 +1010,7 @@ def load_dit(cfg: DictConfig, **overrides: Any) -> nn.Module:
 
     print("[INFO] Loading MultiModalDiT model with config:", cfg)
 
+    from models.dit.dit_multimodal_mod3 import MultiModalDiT
     # Instantiate the MultiModalDiT model
     model = MultiModalDiT(**cfg.dit)
     print("[INFO] Loaded DiT")

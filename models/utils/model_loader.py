@@ -9,8 +9,12 @@ from pathlib import Path
 
 from enums.models.model_types import ModelType
 from enums.training_versions import DiTTrainingVersion
-from models.diffusion.diffusion_multimodal import load_diffusion
-from models.dit.dit_multimodal import load_dit
+# from models.diffusion.diffusion_multimodal import load_diffusion
+# from models.dit.dit_multimodal import load_dit
+# from models.diffusion.diffusion_multimodal_mod3 import load_diffusion
+# from models.dit.dit_multimodal_mod3 import load_dit
+from models.diffusion.diffusion_multimodal_new_copy import load_diffusion
+from models.dit.dit_multimodal_mod3 import load_dit
 from models.vae.vae import load_vae
 
 
@@ -73,7 +77,7 @@ def load_model(
 
         dit_model = load_dit(cfg, **overrides)
 
-        if model_type == ModelType.DIFFUSION:
+        if model_type == ModelType.DIFFUSION: #TODO: dovrei passare training, non solo diff. Forse modificare in overrides
             with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
                 cfg = compose(config_name="diffusion")
 
