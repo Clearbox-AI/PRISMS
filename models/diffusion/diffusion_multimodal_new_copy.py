@@ -158,7 +158,7 @@ class MultiModalDiffusion(ComposerModel):
         self,
         x_img: torch.Tensor,
         x_tab: torch.Tensor,
-        scenario: str,
+        scenario: ScenarioType,
         mask_ratio_img: float,
         mask_ratio_tab: float,
         **kwargs
@@ -174,8 +174,9 @@ class MultiModalDiffusion(ComposerModel):
         N = x_img.shape[0]
 
         # 1) Sample lognormal sigma
-        rnd_normal = torch.randn([N, 1, 1, 1], device=x_img.device)
-        sigma = (rnd_normal * self.edm_config.P_std + self.edm_config.P_mean).exp()
+        sigma = self._sample_sigma(n=N, device=x_img.device)
+        # rnd_normal = torch.randn([N, 1, 1, 1], device=x_img.device)
+        # sigma = (rnd_normal * self.edm_config.P_std + self.edm_config.P_mean).exp()
 
         # Weight factor from EDM
         weight = (sigma ** 2 + self.edm_config.sigma_data ** 2) / ((sigma * self.edm_config.sigma_data) ** 2)
@@ -246,7 +247,7 @@ class MultiModalDiffusion(ComposerModel):
         x_img: torch.Tensor,
         x_tab: torch.Tensor,
         sigma: torch.Tensor,
-        scenario: str,
+        scenario: ScenarioType,
         mask_ratio_img: float,
         mask_ratio_tab: float,
         model_forward_fxn,
@@ -374,17 +375,16 @@ class MultiModalDiffusion(ComposerModel):
         pass
 
     @torch.no_grad()
-    def edm_sampler_loop(
+    def _edm_sampler_loop(
             self,
             x_img: torch.Tensor,
             x_tab: torch.Tensor,
-            scenario: str = 'uncond',
+            scenario: ScenarioType,
             steps: Optional[int] = None,
             cfg: float = 1.0,
             **kwargs
     ) -> (torch.Tensor, torch.Tensor):
         """
-        Multi-modal sampling loop, analogous to the single-modal `edm_sampler_loop`.
 
         We do:
           1) Time step discretization (t_steps).
@@ -613,6 +613,7 @@ class MultiModalDiffusion(ComposerModel):
             scenario: ScenarioType,
             data_bucket: Optional[DataBucket] = None,
             batch_size: int = 4,
+            vae: nn.Module = None,
             device: torch.device = torch.device("cuda"),
     ) -> Tuple[DataBucket, Optional[Dict[Any, List[int]]]]:
         """
@@ -683,6 +684,7 @@ class MultiModalDiffusion(ComposerModel):
             return self._generate_samples_unconditional(
                 n_samples=n_samples,
                 batch_size=batch_size,
+                vae=vae,
                 device=device
             )
         else:
@@ -693,6 +695,7 @@ class MultiModalDiffusion(ComposerModel):
                 scenario=scenario,
                 data_bucket=data_bucket,
                 batch_size=batch_size,
+                vae=vae,
                 device=device
             )
 
@@ -701,6 +704,7 @@ class MultiModalDiffusion(ComposerModel):
             self,
             n_samples: int,
             batch_size: int,
+            vae: nn.Module,
             device: torch.device,
     ) -> Tuple[DataBucket, None]:
         """Generate random latents from scratch, decode to pixel space, return as DataBucket."""
@@ -718,7 +722,7 @@ class MultiModalDiffusion(ComposerModel):
             # If your DIT expects a certain shape, adjust accordingly.
 
             latent_shape_img = (current_bsz, 4, 32, 32)  # example latent shape
-            latent_shape_tab = (current_bsz, 128)  # example table dimension
+            latent_shape_tab = (current_bsz, 174)  # example table dimension
 
             x_img = torch.randn(latent_shape_img, device=device)
             x_tab = torch.randn(latent_shape_tab, device=device)
@@ -733,12 +737,11 @@ class MultiModalDiffusion(ComposerModel):
             final_latents_img, final_latents_tab = self._edm_sampler_loop(
                 x_img,
                 x_tab,
-                scenario=ScenarioType.UNCOND,
-                sigma=sigma
+                scenario=ScenarioType.UNCOND
             )
 
             # (E) Decode latents back to pixel images (and keep table as is or interpret it).
-            decoded_imgs = decode_latents(self.vae, final_latents_img, self.vae_scaling_factor)
+            decoded_imgs = decode_latents(vae, final_latents_img, vae.config.scaling_factor)
             # Store results
             all_images.append(decoded_imgs)
             all_tables.append(final_latents_tab)  # maybe your table is also in latent space,
@@ -768,6 +771,7 @@ class MultiModalDiffusion(ComposerModel):
             scenario: ScenarioType,
             data_bucket: DataBucket,
             batch_size: int,
+            vae: nn.Module,
             device: torch.device,
     ) -> Tuple[DataBucket, Dict[Any, List[int]]]:
         """
@@ -856,7 +860,7 @@ class MultiModalDiffusion(ComposerModel):
             # 3) Encode images if scenario != COND_TABLE
             if scenario in (ScenarioType.COND_IMAGE, ScenarioType.COND_BOTH):
                 # cond_images shape: (current_bsz, 3, H, W) for pixel images
-                latents_img = encode_images(self.vae, cond_images, self.vae_scaling_factor)
+                latents_img = encode_images(vae, cond_images, vae.config.scaling_factor)
             else:
                 # cond_tables only => generate random latents for image
                 # or you might do a zero latents, etc., depending on your logic
@@ -882,12 +886,11 @@ class MultiModalDiffusion(ComposerModel):
             final_latents_img, final_latents_tab = self._edm_sampler_loop(
                 latents_img_noisy,
                 latents_tab_noisy,
-                scenario=scenario,
-                sigma=sigma,
+                scenario=scenario
             )
 
             # 8) Decode images from final latents if needed
-            decoded_imgs = decode_latents(self.vae, final_latents_img, self.vae_scaling_factor)
+            decoded_imgs = decode_latents(vae, final_latents_img, vae.config.scaling_factor)
 
             # 9) Accumulate
             all_images.append(decoded_imgs)
@@ -1404,143 +1407,139 @@ if __name__ == "__main__":
     # print("Sampling tests completed successfully.")
 
 
-    # # ----- EXAMPLE 1: UNCONDITIONAL GENERATION -----
-    # # Generate 16 samples unconditionally, in batches of 4
-    # generated_data_bucket, mapping = diffusion_model.generate_samples(
-    #     n_samples=16,
-    #     scenario='uncond',  # crucial
-    #     batch_size=4,
-    #     guidance_scale=1.0,  # CFG scale
-    #     num_inference_steps=18,
-    #     seed=123,  # optional seed
-    #     device='cuda',
-    #     img_shape=(4, 32, 32),  # your model's expected shape for images
-    #     tab_shape=174,  # your model's expected shape for table data
+    # ----- EXAMPLE 1: UNCONDITIONAL GENERATION -----
+    # Generate 16 samples unconditionally, in batches of 4
+    generated_data_bucket, mapping = diffusion_model.generate_samples(
+        n_samples=16,
+        scenario=ScenarioType.UNCOND,  # Using the Enum
+        batch_size=4,
+        vae=vae,
+        device=torch.device("cuda")
+    )
+
+    # mapping == None for uncond scenario
+    print("Generated Data Label:", generated_data_bucket.label)  # likely 'both'
+    print("Total samples generated:", len(generated_data_bucket.data_source))
+
+    # Because your model might generate latent vectors, you can decode them if needed:
+    # E.g., if each generated_data_bucket.data_source[i] == (img_latent, tab_latent),
+    # you can decode the 'img_latent' into pixel space:
+    for i, (img_latent, tab_latent) in enumerate(generated_data_bucket.data_source):
+        # Suppose you want to decode the image with your VAE:
+        decoded_img = decode_latents(vae, img_latent.unsqueeze(0), vae_cfg.vae.scaling_factor)
+        print(f"Decoded sample {i}, shape={decoded_img.shape}, tab.shape={tab_latent.shape}")
+        # do something with the result (e.g. visualize, save to disk, etc.)
+
+    # # ----- EXAMPLE 2A: IMAGE-CONDITIONAL USING A DATALOADER -----
+    # # Suppose we create a small DataBucket from our training dataloader directly:
+    # image_cond_bucket = DataBucket(
+    #     data_source=train_dataloader,  # the entire dataloader
+    #     label='image'
     # )
     #
-    # # mapping == None for uncond scenario
-    # print("Generated Data Label:", generated_data_bucket.label)  # likely 'both'
-    # print("Total samples generated:", len(generated_data_bucket.data_source))
+    # # Now we generate 20 samples total
+    # generated_data_bucket, cond_map = diffusion_model.generate_samples(
+    #     n_samples=20,
+    #     scenario='cond_image',  # crucial
+    #     batch_size=4,
+    #     data_bucket=image_cond_bucket,
+    #     guidance_scale=1.5,  # example CFG scale
+    #     num_inference_steps=30,
+    #     seed=42,
+    #     device='cuda'
+    # )
     #
-    # # Because your model might generate latent vectors, you can decode them if needed:
-    # # E.g., if each generated_data_bucket.data_source[i] == (img_latent, tab_latent),
-    # # you can decode the 'img_latent' into pixel space:
-    # for i, (img_latent, tab_latent) in enumerate(generated_data_bucket.data_source):
-    #     # Suppose you want to decode the image with your VAE:
-    #     decoded_img = decode_latents(vae, img_latent.unsqueeze(0), vae_cfg.vae.scaling_factor)
-    #     print(f"Decoded sample {i}, shape={decoded_img.shape}, tab.shape={tab_latent.shape}")
-    #     # do something with the result (e.g. visualize, save to disk, etc.)
-
-    # ----- EXAMPLE 2A: IMAGE-CONDITIONAL USING A DATALOADER -----
-    # Suppose we create a small DataBucket from our training dataloader directly:
-    image_cond_bucket = DataBucket(
-        data_source=train_dataloader,  # the entire dataloader
-        label='image'
-    )
-
-    # Now we generate 20 samples total
-    generated_data_bucket, cond_map = diffusion_model.generate_samples(
-        n_samples=20,
-        scenario='cond_image',  # crucial
-        batch_size=4,
-        data_bucket=image_cond_bucket,
-        guidance_scale=1.5,  # example CFG scale
-        num_inference_steps=30,
-        seed=42,
-        device='cuda'
-    )
-
-    print("Generated data label:", generated_data_bucket.label)  # likely 'both'
-    print("Mapping keys:", list(cond_map.keys())[:5], "...")  # shows some condition keys
-
-    # ----- EXAMPLE 2B: IMAGE-CONDITIONAL USING A LIST OF TENSORS/PATHS -----
-    # Let's pretend we extracted 10 images from somewhere:
-    list_of_image_tensors = []
-    for i, batch in enumerate(train_dataloader):
-        imgs = batch['image']
-        for img in imgs:
-            list_of_image_tensors.append(img.cpu())  # store on CPU just for example
-        if len(list_of_image_tensors) >= 10:
-            break
-
-    # Build a DataBucket
-    image_cond_bucket = DataBucket(
-        data_source=list_of_image_tensors,  # a list of Tensors
-        label='image'
-    )
-
-    generated_data_bucket, cond_map = diffusion_model.generate_samples(
-        n_samples=12,
-        scenario='cond_image',
-        data_bucket=image_cond_bucket,
-        batch_size=4,
-        guidance_scale=2.0,
-        num_inference_steps=30,
-        device='cuda',
-        seed=999
-    )
-
-    print("cond_map example:", cond_map)
-    # cond_map keys will be the integer indices in the list (0..9) if you used Tensors,
-    # or the actual path strings if you used file paths.
-
-    # ----- EXAMPLE 3: TABLE-CONDITIONAL GENERATION -----
-    # Suppose we gather tab data from the training dataloader into a list
-    list_of_tab_tensors = []
-    for i, batch in enumerate(train_dataloader):
-        tabs = batch['tabular']  # shape (B, 174)
-        for t in tabs:
-            list_of_tab_tensors.append(t.cpu())
-        if len(list_of_tab_tensors) >= 20:
-            break
-
-    tab_cond_bucket = DataBucket(
-        data_source=list_of_tab_tensors,
-        label='tab'
-    )
-
-    generated_data_bucket, cond_map = diffusion_model.generate_samples(
-        n_samples=15,
-        scenario='cond_table',
-        data_bucket=tab_cond_bucket,
-        batch_size=5,
-        guidance_scale=1.2,
-        num_inference_steps=25,
-        device='cuda',
-    )
-
-    print("Generated data label:", generated_data_bucket.label)  # 'both'
-    print("First condition key => indices:", next(iter(cond_map.items())))
-
-    # ----- EXAMPLE 4: BOTH-CONDITIONAL GENERATION -----
-
-    list_of_pairs = []
-    for i, batch in enumerate(train_dataloader):
-        imgs = batch['image']  # shape (B, C, H, W)
-        tabs = batch['tabular']  # shape (B, 174)
-        for img, tab in zip(imgs, tabs):
-            list_of_pairs.append((img.cpu(), tab.cpu()))
-        if len(list_of_pairs) >= 10:
-            break
-
-    both_cond_bucket = DataBucket(
-        data_source=list_of_pairs,
-        label='both'
-    )
-
-    generated_data_bucket, cond_map = diffusion_model.generate_samples(
-        n_samples=12,
-        scenario='cond_both',
-        data_bucket=both_cond_bucket,
-        batch_size=4,
-        guidance_scale=2.0,
-        num_inference_steps=30,
-        device='cuda',
-        seed=2024
-    )
-
-    print("cond_map:", cond_map)
-    # Each key is either an index or a path (depending on your data_source)
-    # Each value is a list of sample indices generated from that condition.
+    # print("Generated data label:", generated_data_bucket.label)  # likely 'both'
+    # print("Mapping keys:", list(cond_map.keys())[:5], "...")  # shows some condition keys
+    #
+    # # ----- EXAMPLE 2B: IMAGE-CONDITIONAL USING A LIST OF TENSORS/PATHS -----
+    # # Let's pretend we extracted 10 images from somewhere:
+    # list_of_image_tensors = []
+    # for i, batch in enumerate(train_dataloader):
+    #     imgs = batch['image']
+    #     for img in imgs:
+    #         list_of_image_tensors.append(img.cpu())  # store on CPU just for example
+    #     if len(list_of_image_tensors) >= 10:
+    #         break
+    #
+    # # Build a DataBucket
+    # image_cond_bucket = DataBucket(
+    #     data_source=list_of_image_tensors,  # a list of Tensors
+    #     label='image'
+    # )
+    #
+    # generated_data_bucket, cond_map = diffusion_model.generate_samples(
+    #     n_samples=12,
+    #     scenario='cond_image',
+    #     data_bucket=image_cond_bucket,
+    #     batch_size=4,
+    #     guidance_scale=2.0,
+    #     num_inference_steps=30,
+    #     device='cuda',
+    #     seed=999
+    # )
+    #
+    # print("cond_map example:", cond_map)
+    # # cond_map keys will be the integer indices in the list (0..9) if you used Tensors,
+    # # or the actual path strings if you used file paths.
+    #
+    # # ----- EXAMPLE 3: TABLE-CONDITIONAL GENERATION -----
+    # # Suppose we gather tab data from the training dataloader into a list
+    # list_of_tab_tensors = []
+    # for i, batch in enumerate(train_dataloader):
+    #     tabs = batch['tabular']  # shape (B, 174)
+    #     for t in tabs:
+    #         list_of_tab_tensors.append(t.cpu())
+    #     if len(list_of_tab_tensors) >= 20:
+    #         break
+    #
+    # tab_cond_bucket = DataBucket(
+    #     data_source=list_of_tab_tensors,
+    #     label='tab'
+    # )
+    #
+    # generated_data_bucket, cond_map = diffusion_model.generate_samples(
+    #     n_samples=15,
+    #     scenario='cond_table',
+    #     data_bucket=tab_cond_bucket,
+    #     batch_size=5,
+    #     guidance_scale=1.2,
+    #     num_inference_steps=25,
+    #     device='cuda',
+    # )
+    #
+    # print("Generated data label:", generated_data_bucket.label)  # 'both'
+    # print("First condition key => indices:", next(iter(cond_map.items())))
+    #
+    # # ----- EXAMPLE 4: BOTH-CONDITIONAL GENERATION -----
+    #
+    # list_of_pairs = []
+    # for i, batch in enumerate(train_dataloader):
+    #     imgs = batch['image']  # shape (B, C, H, W)
+    #     tabs = batch['tabular']  # shape (B, 174)
+    #     for img, tab in zip(imgs, tabs):
+    #         list_of_pairs.append((img.cpu(), tab.cpu()))
+    #     if len(list_of_pairs) >= 10:
+    #         break
+    #
+    # both_cond_bucket = DataBucket(
+    #     data_source=list_of_pairs,
+    #     label='both'
+    # )
+    #
+    # generated_data_bucket, cond_map = diffusion_model.generate_samples(
+    #     n_samples=12,
+    #     scenario='cond_both',
+    #     data_bucket=both_cond_bucket,
+    #     batch_size=4,
+    #     guidance_scale=2.0,
+    #     num_inference_steps=30,
+    #     device='cuda',
+    #     seed=2024
+    # )
+    #
+    # print("cond_map:", cond_map)
+    # # Each key is either an index or a path (depending on your data_source)
+    # # Each value is a list of sample indices generated from that condition.
 
 
