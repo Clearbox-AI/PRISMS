@@ -8,12 +8,12 @@ defaults:
 
 dit:
   # base input settings
-  input_size: 64
-  patch_size: 4
+  input_size: 32
+  patch_size: 2
   in_channels: 4
   dim: 512
-  depth: 20
-  head_dim: 32
+  depth: 24
+  head_dim: 64
   multiple_of: 256
   qkv_multipliers: [1.0]
   ffn_multipliers: [4.0]
@@ -25,8 +25,8 @@ dit:
   tab_groups: 10
   out_table_features: 174
   # Patch mixer
-  use_patch_mixer: False
-  patch_mixer_depth: 4
+  use_patch_mixer: True
+  patch_mixer_depth: 6
   patch_mixer_dim: 512
   patch_mixer_qkv_ratio: 1.0
   patch_mixer_mlp_ratio: 4.0
@@ -38,11 +38,12 @@ dit:
 data:
   dataset_type: "nacc"
   # dimensions
-  image_height: 512
-  image_width: 512
+  image_size: 32
+  image_height: 256
+  image_width: 256
   target_channels: 3
   # dataloader
-  batch_size: 8
+  batch_size: 16
   num_workers: 0
   # processing
   do_image_normalize: true
@@ -67,20 +68,20 @@ training:
   latent_reg_weight: 0.01
   # hyperparameters
   epochs: 800
-  save_model_interval: 2
+  save_model_interval: 5000
   lr: 1.5e-4
   # sampling
   sample_conditioning: 1.0
   sample_steps: 20
   sample_latents_path: ""
-  sample_interval: 2
+  sample_interval: 200
   # logging/saving
   log_interval: 10
   base_save_path: "/mnt/storage/nacc_sub/dit"
-  save_label: "" # if you need to add a certain label to the model output path, other than the date
-  resume_training: true
-  resume_checkpoint_dir: "/mnt/storage/nacc_sub/dit/2025-02-26_13-08-42"
+  save_label: "stable_model" # if you need to add a certain label to the model output path, other than the date
+  resume_training: false
+  resume_checkpoint_dir: "" #"/mnt/storage/nacc_sub/dit/2025-02-26_13-08-42"
 
 distributed:
-  use_ddp: false
+  use_ddp: true
   backend: nccl

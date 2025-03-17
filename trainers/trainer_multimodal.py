@@ -46,7 +46,7 @@ def train_one_epoch(
         latents = encode_images(vae, images, cfg.vae.scaling_factor)
 
         # 3) Forward and loss
-        total_loss, image_loss, tab_loss = model(latents, tab_data)
+        total_loss = model(latents, tab_data)
         last_total_loss = total_loss.item()
 
         optimizer.zero_grad(set_to_none=True)
@@ -55,10 +55,7 @@ def train_one_epoch(
 
         # 4) Logging (only rank-0 prints)
         if is_main_process() and (global_step % cfg.training.log_interval == 0):
-            msg = (f"[Epoch {epoch + 1} | Step {global_step}] "
-                   f"Img Loss: {image_loss.item():.4f}")
-            if tab_loss is not None:
-                msg += f" | Tab Loss: {tab_loss.item():.4f}"
+            msg = f"[Epoch {epoch + 1} | Step {global_step}] "
             msg += f" | Total: {last_total_loss:.4f}"
             print(msg)
 
@@ -68,7 +65,7 @@ def train_one_epoch(
             with torch.no_grad():
                 # Sample latents (conditional on tab_data)
                 sub_tab = tab_data[:cfg.training.sample_batch_size].to(device)
-                sampled_latents, cond_tab_out = ddp_sample(
+                sampled_latents = ddp_sample(
                     model=model,
                     batch_size=cfg.training.sample_batch_size,
                     table_data=sub_tab,
@@ -82,9 +79,6 @@ def train_one_epoch(
                 # Now decode latents -> images
                 decoded_imgs = decode_latents(vae, sampled_latents, cfg.vae.scaling_factor)
                 save_images(base_save_path, decoded_imgs, global_step)
-
-                if cond_tab_out is not None:
-                    save_tabulars(base_save_path, cond_tab_out, global_step)
 
             model.train()
 

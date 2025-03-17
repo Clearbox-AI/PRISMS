@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from typing import Optional, Tuple, Any
+
+from torch import Tensor
 from torchvision.utils import save_image
 from omegaconf import DictConfig
 from pathlib import Path
@@ -73,7 +75,7 @@ class MultiModalDiffusion(nn.Module):
         self.train_mask_ratio = train_mask_ratio
         self.latent_reg_weight = latent_reg_weight
 
-    def forward(self, images: torch.Tensor, table_data: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    def forward(self, images: torch.Tensor, table_data: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Perform a forward pass to compute the EDM loss.
 
@@ -134,30 +136,21 @@ class MultiModalDiffusion(nn.Module):
             reg_loss = mean_loss + std_loss
             image_loss = image_loss + self.latent_reg_weight * reg_loss
 
-        # Optional table loss
-        tab_loss = None
-        if torch.is_tensor(table_data):
-            pred_tab = out['table_sample']
-            tab_loss_val = F.mse_loss(pred_tab, table_data, reduction='none').mean(dim=1)
-            tab_loss = tab_loss_val.mean()
-            total_loss = image_loss + tab_loss
-        else:
-            total_loss = image_loss
 
-        return total_loss, image_loss, tab_loss
+        return image_loss
 
     @torch.no_grad()
     def sample(
-            self, batch_size: int = 4, table_data: Optional[torch.Tensor] = None, cfg: float = 1.0,
+            self, batch_size: int = 4, table_data: torch.Tensor = None, cfg: float = 1.0,
             steps: Optional[int] = None, height: int = 64, width: int = 64, device: str = 'cuda',
             save_path: Optional[str] = None
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tensor:
         """
         Produce samples using the EDM sampler.
 
         Args:
             batch_size (int): Number of images to sample.
-            table_data (Optional[torch.Tensor]): Conditioning tabular data.
+            table_data [torch.Tensor]: Conditioning tabular data.
             cfg (float): Classifier-Free Guidance scale.
             steps (int, optional): Number of sampling steps. Defaults to self.num_steps.
             height (int): Image height.
@@ -167,7 +160,6 @@ class MultiModalDiffusion(nn.Module):
 
         Returns:
             final_latents (torch.Tensor): The final latents of shape (B, C, H, W).
-            latest_tab_sample (Optional[torch.Tensor]): The final predicted table sample if available.
         """
         self.eval()
         steps = steps or self.num_steps
@@ -177,11 +169,10 @@ class MultiModalDiffusion(nn.Module):
         x = torch.randn((batch_size, c, height, width), device=device)
         t_vals = self.create_edm_timesteps(steps, device)
         x_next = x.double() * t_vals[0]
-        latest_tab_sample = None
 
         def model_forward(
-                x_in: torch.Tensor, t_sigma: torch.Tensor, tab_data: Optional[torch.Tensor], cfg_val: float
-        ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                x_in: torch.Tensor, t_sigma: torch.Tensor, tab_data: torch.Tensor, cfg_val: float
+        ) -> torch.Tensor:
             """
             Internal utility function to run the underlying model forward with the EDM scaling.
             """
@@ -203,9 +194,8 @@ class MultiModalDiffusion(nn.Module):
                 mask_ratio=0.0
             )
             Fx = out['image_sample'].float()
-            tab_sample = out.get('table_sample', None)
             denoised = c_skip * x_in + c_out * Fx
-            return denoised, tab_sample
+            return denoised
 
         # Sampler loop
         for i, (t_cur, t_next) in enumerate(zip(t_vals[:-1], t_vals[1:])):
@@ -216,21 +206,15 @@ class MultiModalDiffusion(nn.Module):
             x_hat = x_cur + (t_hat**2 - t_cur**2).sqrt() * self.s_noise * torch.randn_like(x_cur)
 
             # Euler step
-            denoised, tab_sample = model_forward(x_hat, t_hat, table_data, cfg)
+            denoised = model_forward(x_hat, t_hat, table_data, cfg)
             denoised = denoised.double()
-            if tab_sample is not None:
-                tab_sample = tab_sample.double()
-                latest_tab_sample = tab_sample.detach().cpu()
             d_cur = (x_hat - denoised) / t_hat
             x_next = x_hat + (t_next - t_hat) * d_cur
 
             # 2nd order correction
             if i < steps - 1:
-                denoised2, tab_sample2 = model_forward(x_next, t_next, table_data, cfg)
+                denoised2 = model_forward(x_next, t_next, table_data, cfg)
                 denoised2 = denoised2.double()
-                if tab_sample2 is not None:
-                    tab_sample2 = tab_sample2.double()
-                    latest_tab_sample = tab_sample2.detach().cpu()
                 d_prime = (x_next - denoised2) / t_next
                 x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
@@ -244,7 +228,7 @@ class MultiModalDiffusion(nn.Module):
             )
             save_image(latents_for_vis, save_path, nrow=int(batch_size**0.5))
 
-        return final_latents, latest_tab_sample
+        return final_latents
 
     def create_edm_timesteps(self, steps: int, device: torch.device) -> torch.Tensor:
         """
@@ -314,14 +298,12 @@ if __name__ == "__main__":
         table_data = torch.randn(4, 174).cuda()  # (B=4, some tab dim=10)
 
         # Forward pass
-        total_loss, image_loss, tab_loss = diffusion_model(images, table_data)
+        total_loss = diffusion_model(images, table_data)
         print(f"Total loss: {total_loss.item():.4f}")
-        print(f"Image loss: {image_loss.item():.4f}")
-        print(f"Table loss: {tab_loss.item():.4f}" if tab_loss is not None else "No table loss")
 
         # Sampling demonstration
         with torch.no_grad():
-            latents, latest_tab = diffusion_model.sample(
+            latents = diffusion_model.sample(
                 batch_size=4,
                 table_data=table_data,
                 steps=10,
@@ -330,5 +312,3 @@ if __name__ == "__main__":
                 device='cuda'
             )
             print("Sampled latents shape:", latents.shape)
-            if latest_tab is not None:
-                print("Sampled table shape:", latest_tab.shape)

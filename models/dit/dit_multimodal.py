@@ -831,17 +831,6 @@ class MultiModalDiT(nn.Module):
         If cfg > 1.0 => do classifier-free guidance mixing (cond vs. uncond).
         """
 
-        # if cfg == 1.0:
-        #     return self.forward_without_cfg(x_img, t, tab, mask_ratio=mask_ratio)
-        # else:
-        #     return self.forward_with_cfg(x_img, t, tab, cfg=cfg, mask_ratio=mask_ratio)
-
-        if tab is None:
-            B = x_img.shape[0]
-            # Make a zero tensor with shape [B, num_tab_columns]
-            tab = torch.zeros(B, self.num_tab_columns, device=x_img.device, dtype=x_img.dtype)
-
-            # If no CFG, do a standard forward pass (all conditional or all unconditional).
         if cfg == 1.0:
             return self.forward_without_cfg(x_img, t, tab, mask_ratio=mask_ratio)
         else:
@@ -896,12 +885,8 @@ class MultiModalDiT(nn.Module):
             img_logits = unmask_tokens(img_logits, ids_restore, self.mask_token)
         img_out = self.unpatchify(img_logits)
 
-        # 8) final tab => from tab_pooled
-        tab_out = self.final_tab(tab_pooled)
-
         return {
             "image_sample": img_out,  # (B, C, H, W)
-            "table_sample": tab_out,  # (B, out_table_features)
             "mask": mask
         }
 
@@ -930,34 +915,28 @@ class MultiModalDiT(nn.Module):
         tab_cat = torch.cat([tab, zeros_tab], dim=0)
 
         # if t has shape (B, ), replicate => (2B, )
-        if t.ndim == 1 and t.shape[0] == B:
-            t_cat = torch.cat([t, t], dim=0)
-        else:
-            # if t is already (2B,) or has some shape => adapt. For simplicity:
-            t_cat = torch.cat([t, t], dim=0)
+        # if t.ndim == 1 and t.shape[0] == B:
+        if len(t) != 1:
+            t = torch.cat([t, t], dim=0)
 
         # single pass with the expanded batch => (2B, ...)
         out_cat = self.forward_without_cfg(
             x_img_cat,
-            t_cat,
+            t,
             tab_cat,
             mask_ratio=mask_ratio
         )
-        # out_cat => dict with image_sample => (2B, C,H,W), table_sample => (2B, out_table_features)
+        # out_cat => dict with image_sample => (2B, C,H,W)
 
         # split
         image_sample_cat = out_cat['image_sample']  # (2B, C,H,W)
-        table_sample_cat = out_cat['table_sample']  # (2B, out_table_features)
         cond_img, uncond_img = torch.split(image_sample_cat, B, dim=0)
-        cond_tab, uncond_tab = torch.split(table_sample_cat, B, dim=0)
 
         # combine => uncond + cfg*(cond - uncond)
         final_img = uncond_img + cfg * (cond_img - uncond_img)
-        final_tab = uncond_tab + cfg * (cond_tab - uncond_tab)
 
         return {
             "image_sample": final_img,
-            "table_sample": final_tab,
             "mask": None
         }
 
@@ -1057,8 +1036,7 @@ if __name__ == "__main__":
 
 
     # 3) Forward pass
-    res = model(x_img, t, tab, mask_ratio=0.2)
-    if res["mask"] is not None:
-        print("img_out shape:", res["image_sample"].shape)  # (N, 3, 64, 64)
-        print("table_sample:", res['table_sample'].shape)  # (N, 10)
+    res = model(x_img, t, tab, mask_ratio=0.2, cfg=1.2)
+    print("img_out shape:", res["image_sample"].shape)  # (N, 3, 64, 64)
+
 
