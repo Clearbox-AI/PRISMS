@@ -774,12 +774,6 @@ class MultiModalDiT(nn.Module):
             norm_layer=create_norm('layernorm', dim, eps=norm_eps),
         )
 
-        # final tab => for row reconstruction
-        self.final_tab = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, out_table_features)
-        )
-
         # mask token
         self.register_buffer("mask_token", torch.zeros(1, 1, patch_size**2*self.out_channels))
 

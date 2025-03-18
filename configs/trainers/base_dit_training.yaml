@@ -43,7 +43,7 @@ data:
   image_width: 256
   target_channels: 3
   # dataloader
-  batch_size: 16
+  batch_size: 8
   num_workers: 0
   # processing
   do_image_normalize: true
