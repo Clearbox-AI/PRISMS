@@ -16,11 +16,20 @@ from models.utils.model_loader import load_model
 from data.loader import load_training_data
 from enums.models.model_types import ModelType
 from enums.training_versions import DiTTrainingVersion
-from utils.ddp import is_main_process, ddp_sample, setup_distributed, cleanup_distributed
+from utils.ddp import is_main_process, setup_distributed, cleanup_distributed
 from utils.model import save_checkpoint, resume_from_checkpoint, strip_ddp_prefix
 from utils.path_management import setup_storage_directory
 from utils.data import save_images, save_tabulars
 from models.vae.vae import encode_images, decode_latents
+
+def ddp_sample(model, *args, **kwargs):
+    """
+    Calls 'sample' on the underlying model if wrapped in DDP.
+    """
+    if isinstance(model, DDP):
+        return model.module.generate(*args, **kwargs)
+    else:
+        return model.generate(*args, **kwargs)
 
 
 def train_one_epoch(
@@ -35,6 +44,9 @@ def train_one_epoch(
     model.train()
     last_total_loss = 0.0
 
+    scenarios = ["uncond", "cond_image", "cond_table", "cond_both"]
+    scenario_probs = [0.45, 0.10, 0.45, 0.0]
+
     for batch_idx, batch in enumerate(train_loader):
         global_step += 1
 
@@ -45,8 +57,12 @@ def train_one_epoch(
         # 2) Encode images -> latents (via VAE)
         latents = encode_images(vae, images, cfg.vae.scaling_factor)
 
+        # 3) Choose a scenario for this batch
+        scenario = random.choices(scenarios, weights=scenario_probs, k=1)[0]
+
         # 3) Forward and loss
-        total_loss, image_loss, tab_loss = model(latents, tab_data)
+        loss, _, _ = model({"image": latents, "tabular": tab_data, "scenario": scenario})
+        total_loss, image_loss, tab_loss = loss["loss"], loss["loss_img"], loss["loss_tab"]
         last_total_loss = total_loss.item()
 
         optimizer.zero_grad(set_to_none=True)
@@ -68,23 +84,66 @@ def train_one_epoch(
             with torch.no_grad():
                 # Sample latents (conditional on tab_data)
                 sub_tab = tab_data[:cfg.training.sample_batch_size].to(device)
-                sampled_latents, cond_tab_out = ddp_sample(
-                    model=model,
-                    batch_size=cfg.training.sample_batch_size,
-                    table_data=sub_tab,
-                    cfg=cfg.training.sample_conditioning,
-                    steps=cfg.training.sample_steps,
-                    height=cfg.data.image_size,
-                    width=cfg.data.image_size,
-                    device=device,
-                    save_path=cfg.training.sample_latents_path
-                )
-                # Now decode latents -> images
-                decoded_imgs = decode_latents(vae, sampled_latents, cfg.vae.scaling_factor)
-                save_images(base_save_path, decoded_imgs, global_step)
+                sub_img = images[:cfg.training.sample_batch_size].to(device)
 
-                if cond_tab_out is not None:
-                    save_tabulars(base_save_path, cond_tab_out, global_step)
+                ###########################################################################################
+                # Define sampling configurations
+                sample_configs = [
+                    {
+                        "scenario": "uncond",
+                        "suffix": "uncond",
+                        # In "uncond", we pass no initial latents for either domain
+                        "image_init": None,
+                        "table_init": None,
+                    },
+                    {
+                        "scenario": "cond_image",
+                        "suffix": "cond_image",
+                        # Condition on the image latents => keep image, random table
+                        "image_init": sub_img,
+                        "table_init": None,
+                    },
+                    {
+                        "scenario": "cond_table",
+                        "suffix": "cond_table",
+                        # Condition on the table => random image
+                        "image_init": None,
+                        "table_init": sub_tab,
+                    },
+                    {
+                        "scenario": "cond_both",
+                        "suffix": "cond_both",
+                        # Condition on both
+                        "image_init": sub_img,
+                        "table_init": sub_tab,
+                    }
+                ]
+
+                # Perform sampling, decoding, and saving in a loop
+                for config in sample_configs:
+                    scenario_str = config["scenario"]
+                    latents_img_out, latents_tab_out = ddp_sample(
+                        model,
+                        scenario=scenario_str,
+                        image_init=encode_images(vae, config["image_init"], cfg.vae.scaling_factor)
+                        if config["image_init"] is not None else None,
+                        table_init=config["table_init"],
+                        guidance_scale=cfg.diffusion.get("cfg_scale", 1.0),
+                        num_inference_steps=cfg.diffusion.get("num_inference_steps", 30),
+                        device=device
+                    )
+                    suffix = f"{global_step}_{config['suffix']}"
+
+                    # 1) Decode image latents -> actual images
+                    if latents_img_out is not None:
+                        recon_images = decode_latents(vae, latents_img_out, cfg.vae.scaling_factor)
+                        save_images(base_save_path, recon_images, suffix)
+
+                    # 2) Save tabular data if latents_tab_out is relevant
+                    if latents_tab_out is not None:
+                        save_tabulars(base_save_path, latents_tab_out, suffix)
+
+                ###########################################################################################
 
             model.train()
 

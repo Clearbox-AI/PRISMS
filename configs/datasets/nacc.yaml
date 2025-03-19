@@ -7,6 +7,8 @@ data:
   image_height: 256
   image_width: 256
   target_channels: 3
+  latent_channels: 4
+  tab_size: 174
   # dataloader
   dataset_type: "nacc"
   batch_size: 16
