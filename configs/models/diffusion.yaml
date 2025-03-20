@@ -1,8 +1,22 @@
 diffusion:
+#  sigma_min: 0.002
+#  sigma_max: 20
+#  p_mean: -0.6
+#  p_std: 1.2
+#  sigma_data: 0.9
+#  num_steps: 18
+  train_mask_ratio: 0.0
+
+EDM:
   sigma_min: 0.002
-  sigma_max: 20
+  sigma_max: 80
   p_mean: -0.6
   p_std: 1.2
   sigma_data: 0.9
   num_steps: 18
-  train_mask_ratio: 0.0
+  rho: 7
+  s_churn: 0
+  s_min: 0
+  s_max: 999999999
+  s_noise: 1
+  dtype: "float32"

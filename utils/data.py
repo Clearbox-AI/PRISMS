@@ -2,7 +2,10 @@ import torch
 import pandas as pd
 from torchvision.utils import save_image
 from pathlib import Path
-from typing import Union
+from typing import Union, List, Any
+
+from enums.models.diffusion import DataLabel
+from torch.utils.data import DataLoader
 
 
 def save_images(base_save_path: Path, samples: torch.Tensor, label: Union[str, int]):
@@ -14,3 +17,30 @@ def save_tabulars(base_save_path: Path, samples: torch.Tensor, label: Union[str,
     samples_csv = Path(base_save_path, "samples", f"tabular_step_{label}.csv")
     pd.DataFrame(samples.cpu().numpy()).to_csv(samples_csv, index=False)
     print(f"Saved sample table => {samples_csv}")
+
+
+class DataBucket:
+    """
+    A container for conditional data or for the final generated samples.
+    - data_source can be:
+        1) A PyTorch DataLoader,
+        2) A list of data items (e.g., images, tabular features, or (img, tab) pairs).
+    - label: indicates what type of data is in data_source (image, tab, or both).
+    """
+
+    def __init__(self, data_source: Union[DataLoader, List[Any]], label: DataLabel):
+        self.data_source = data_source
+        self.label = label
+
+    def __len__(self):
+        if isinstance(self.data_source, DataLoader):
+            # length in terms of #batches (not always exact). For “infinite” iteration, this is less relevant.
+            return len(self.data_source)
+        return len(self.data_source)
+
+
+def infinite_loader(dataloader: DataLoader):
+    """Create a persistent iterator that cycles through a dataloader indefinitely."""
+    while True:
+        for batch in dataloader:
+            yield batch

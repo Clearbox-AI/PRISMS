@@ -909,9 +909,8 @@ class MultiModalDiT(nn.Module):
         tab_cat = torch.cat([tab, zeros_tab], dim=0)
 
         # if t has shape (B, ), replicate => (2B, )
-        # if t.ndim == 1 and t.shape[0] == B:
-        if len(t) != 1:
-            t = torch.cat([t, t], dim=0)
+        # if t.shape[0] != 1:
+        t = torch.cat([t, t], dim=0)  # (2B,)
 
         # single pass with the expanded batch => (2B, ...)
         out_cat = self.forward_without_cfg(
