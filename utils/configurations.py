@@ -2,6 +2,8 @@ import os
 
 from omegaconf import DictConfig
 from typing import Dict, Any
+from pathlib import Path
+from hydra import compose, initialize_config_dir
 
 
 def get_project_root():
@@ -48,3 +50,10 @@ def apply_overrides(cfg: DictConfig, overrides: Dict[str, Any]) -> DictConfig:
                 section[key] = value
                 break
     return cfg
+
+
+def load_hydra_config(config_subdir: str, config_name: str):
+    set_project_root()
+    config_dir = Path(os.environ["PROJECT_ROOT"], "configs", config_subdir)
+    with initialize_config_dir(config_dir=str(config_dir)):
+        return compose(config_name=config_name)

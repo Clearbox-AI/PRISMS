@@ -6,6 +6,7 @@ diffusion:
 #  sigma_data: 0.9
 #  num_steps: 18
   train_mask_ratio: 0.0
+  ckpt: "ckpt_to_resume"
 
 EDM:
   sigma_min: 0.002
