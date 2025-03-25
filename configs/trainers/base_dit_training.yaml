@@ -44,18 +44,18 @@ dit:
   table_width: 174
   table_patch_size: 2
 
-  hidden_dim: 256
-  depth: 24
-  head_dim: 32
-  mlp_ratio_img: 4.0
-  mlp_ratio_tab: 4.0
+  hidden_dim: 256 #256
+  depth: 28 #24
+  head_dim: 16
+  mlp_ratio_img: 6.0 #4.0
+  mlp_ratio_tab: 6.0 #4.0
   qkv_ratio_img: 1.0
   qkv_ratio_tab: 1.0
-  multiple_of: 128
+  multiple_of: 256 #128
   use_bias: True
   depth_init: True
   experts_every_n: 2
-  num_experts: 8
+  num_experts: 16 #8
   expert_capacity: 1.0
 
 #  use_patch_mixer_img: True
@@ -71,14 +71,14 @@ dit:
 #  patch_mixer_qkv_ratio_tab: 1.0
 
   use_patch_mixer_img: True
-  patch_mixer_depth_img: 2
-  patch_mixer_dim_img: 128
+  patch_mixer_depth_img: 4 #2
+  patch_mixer_dim_img: 256 #128
   patch_mixer_mlp_ratio_img: 4.0
   patch_mixer_qkv_ratio_img: 1.0
 
   use_patch_mixer_tab: True
-  patch_mixer_depth_tab: 2
-  patch_mixer_dim_tab: 128
+  patch_mixer_depth_tab: 4 #2
+  patch_mixer_dim_tab: 256 #128
   patch_mixer_mlp_ratio_tab: 4.0
   patch_mixer_qkv_ratio_tab: 1.0
 
@@ -92,7 +92,7 @@ data:
   image_width: 256
   target_channels: 3
   # dataloader
-  batch_size: 16
+  batch_size: 8
   num_workers: 0
   # processing
   do_image_normalize: true
@@ -102,9 +102,9 @@ data:
   debug: false
 
 diffusion:
-  sigma_min: 0.002
+  sigma_min: 0.01 #0.002
   sigma_max: 20
-  p_mean: -0.6
+  p_mean: -1.2 #-0.6
   p_std: 1.2
   sigma_data: 0.9
   num_steps: 5
@@ -128,8 +128,8 @@ training:
   log_interval: 10
   base_save_path: "/mnt/storage/nacc_sub/dit"
   save_label: "redone" # if you need to add a certain label to the model output path, other than the date
-  resume_training: false
-  resume_checkpoint_dir: ""
+  resume_training: true
+  resume_checkpoint_dir: "/mnt/storage/nacc_sub/dit/2025-03-24_18-56-42_redone"
 
 distributed:
   use_ddp: true

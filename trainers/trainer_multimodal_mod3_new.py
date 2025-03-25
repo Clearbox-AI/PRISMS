@@ -45,7 +45,7 @@ def train_one_epoch(
     last_total_loss = 0.0
 
     scenarios = ["uncond", "cond_image", "cond_table", "cond_both"]
-    scenario_probs = [0.45, 0.10, 0.45, 0.0]
+    scenario_probs = [0.5, 0.0, 0.5, 0.0]
 
     for batch_idx, batch in enumerate(train_loader):
         global_step += 1

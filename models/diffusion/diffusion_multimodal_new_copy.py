@@ -9,6 +9,7 @@ from typing import Any, Tuple
 from omegaconf import DictConfig
 import torch
 from typing import List, Dict, Optional
+import torch.nn.functional as F
 
 from torch import Tensor
 
@@ -67,11 +68,11 @@ class MultiModalDiffusion(ComposerModel):
         # EDM hyperparameters
         self.edm_config = EasyDict({
             'sigma_min': 0.002,
-            'sigma_max': 80,
+            'sigma_max': 40,
             'P_mean': p_mean,
             'P_std': p_std,
             'sigma_data': 0.9,
-            'num_steps': 18,
+            'num_steps': 32,
             'rho': 7,
             'S_churn': 0,
             'S_min': 0,
