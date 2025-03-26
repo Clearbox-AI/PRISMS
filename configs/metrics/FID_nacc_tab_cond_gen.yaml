@@ -1,0 +1,28 @@
+# dataset: nacc
+# conditioning data: tabular
+# generated data: image
+# metric requirements: ...
+
+real_data:
+  artifact_key: "conditioning_tab_folder"
+  source_type: "folder"
+  data_label: "tab"
+  folder_path: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
+#  nacc_params:
+#    data_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
+#    image_height: 256
+#    image_width: 256
+
+cond_data:
+  artifact_key: "conditioning_tab_folder"
+  source_type: "folder"
+  data_label: "tab"
+  folder_path: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
+
+gen_data:
+  artifact_key: "generated_image_folder"
+  data_label: "image"
+  n_samples: 5
+  batch_size: 4
+  device: "cuda"
+  ckpt: "/mnt/storage/nacc_sub/dit/2025-03-24_18-56-42_redone/checkpoints/checkpoint_step_45000.pt"

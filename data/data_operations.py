@@ -1,8 +1,6 @@
-import os
-from enum import Enum
 from typing import Any, Dict, List, Optional
 from utils.configurations import load_hydra_config
-from models.vae.vae import decode_latents, load_vae
+from models.vae.vae import load_vae
 from utils.model import load_checkpoint
 from models.utils.model_loader import load_model
 from enums.models.model_types import ModelType
@@ -10,13 +8,19 @@ from enums.training_versions import DiTTrainingVersion
 
 
 from data.artifact_store import ArtifactStore
-from data.multimodal_dataset import DataBucket
+from data.data_bucket import DataBucket
 from enums.models.diffusion import DataLabel
 from data.nacc_dataset import NaccDataset
 
-from enums.generation import SourceType, DataLabel, StorageFormat
+from enums.generation import SourceType, DataLabel
 
-
+import os
+import shutil
+import tempfile
+import pickle
+import json
+import numpy as np
+import torch
 
 
 def save_generated_data(
@@ -155,24 +159,14 @@ def load_generated_data(
     device = cfg.get("device", "cuda")
 
     # 1) Possibly load conditioning data
-    cond_cfg = cfg.get("conditioning_data", None)
+    cond_cfg = cfg.get("cond_data", None)
     cond_bucket = None
-
-    """
-    an example of cond_cfg might look like:
-    cond_cfg = {
-        "folder_path": "blabla",
-        "artifact_key": "some_artifact_key",
-        "source_type": "folder",
-        "data_label": "tab"
-    }
-    """
 
     if cond_cfg is not None and not condition_bucket:
         if cond_cfg["source_type"] == "folder":
             cond_bucket = load_data_from_config(store, cond_cfg, force=False)
 
-    dif_cfg = load_hydra_config("metrics", "FID").diffusion
+    # dif_cfg = load_hydra_config("metrics", "FID").diffusion
     vae_cfg = load_hydra_config("models", "vae")
 
     vae = load_vae(vae_cfg)
@@ -183,7 +177,7 @@ def load_generated_data(
         model_variant=DiTTrainingVersion.base_dit_training
     )
     diffusion_model.to(device)
-    load_checkpoint(diffusion_model, dif_cfg.ckpt, device)
+    load_checkpoint(diffusion_model, cfg["ckpt"], device)
 
 
     # 3) Actually generate
@@ -196,7 +190,7 @@ def load_generated_data(
     )
 
     # 4) Build a DataBucket
-    # Actually the generate_samples will create samples in two ways: saving data on disk and so when loaded of type FOLDER, or directly returning the Databucket with in memory lists so of type LIST (using the save_generated_data function)
+    # TODO: Actually the generate_samples will create samples in two ways: saving data on disk and so when loaded of type FOLDER, or directly returning the Databucket with in memory lists so of type LIST (using the save_generated_data function)
     bucket = DataBucket(
         source_type=SourceType.LIST,
         label=label,
@@ -206,36 +200,6 @@ def load_generated_data(
     # 5) Put in store
     store.put_artifact(artifact_key, bucket, save_to_disk=True)
     return bucket
-
-
-###############################################################################
-# 6) get_data_for_metric => typical usage from the "metric manager"
-###############################################################################
-def get_data_for_metric(
-    store: ArtifactStore,
-    metric_name: str,
-    config: Dict[str, Any],
-    force: bool = False
-) -> DataBucket:
-    """
-    Suppose your "metric manager" calls this function with a config specifying
-    how to get data. The config might say:
-      {
-        "artifact_key": "...",
-        "source_type": "nacc" | "folder" | "list",
-        "data_label": "image" | "tab" | "both",
-        "folder_path": "blabla"
-        ...
-      }
-    """
-    source_type_str = config["source_type"]
-
-
-    cond_data = load_data_from_config(store, config, force=force)
-
-    generated_data = load_generated_data(store=store, condition_bucket=cond_data, cfg=None, force=force)
-
-    return ...
 
 
 def get_model_for_metric(
@@ -275,23 +239,6 @@ def get_model_for_metric(
     store.put_artifact(artifact_key, model, save_to_disk=True)
     return model
 
-
-"""
-example of chaining requests:
-
-cond_data = get_data_for_metric(...)
-gen_data = load_generated_data(store, cond_data, gen_cfg, force=False)
-model = get_model_for_metric(store, model_cfg, training_data=gen_data)
-metric_val= compute_my_metric(model, gen_data, additional_args...)
-"""
-
-import os
-import shutil
-import tempfile
-import pickle
-import json
-import numpy as np
-import torch
 
 def test_load_data_from_config_folder():
     """
@@ -333,6 +280,7 @@ def test_load_data_from_config_folder():
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+###################### TEST CODE ######################
 def test_save_generated_data():
     """
     Tests that we can save in-memory data from a result_bucket and input_bucket

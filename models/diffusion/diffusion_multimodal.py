@@ -17,13 +17,13 @@ import torch.distributed as dist
 from utils.ddp import is_main_process
 from utils.configurations import apply_overrides
 from utils.data import infinite_loader, DataLabel
-from data.multimodal_dataset import DataBucket
+from data.data_bucket import DataBucket
 from models.dit.dit_multimodal import load_dit
 from models.vae.vae import decode_latents, load_vae
 from data.loader import load_training_data
 from utils.ddp import (is_dist_available_and_initialized, get_world_size, get_rank, all_gather_tensor,
                        all_gather_object, setup_distributed)
-from data.multimodal_dataset import SourceType
+from enums.generation import SourceType
 
 DTYPE_MAP = {
     'float32': torch.float32,
@@ -294,94 +294,6 @@ class MultiModalDiffusion(nn.Module):
               - A dictionary mapping from condition key -> list of sample indices.
               - A DataBucket of shape (#samples, <tabular_dim>) containing the conditioning data.
         """
-        # if data_bucket.label not in (DataLabel.TAB, DataLabel.BOTH):
-        #     raise ValueError("DataBucket must be labeled TAB or BOTH for table conditioning.")
-        #
-        # # Turn data_source into an iterator if it's a DataLoader
-        # if isinstance(data_bucket.data_source, torch.utils.data.DataLoader):
-        #     cond_iter = infinite_loader(data_bucket.data_source)
-        # else:
-        #     cond_iter = None
-        #
-        # cond_mapping: Dict[Any, List[int]] = {}
-        # all_decoded_imgs = []
-        # all_tab_data = []  # Will store each batch's tab_data here
-        #
-        # total_generated = 0
-        # global_index = 0
-        #
-        # while total_generated < n_samples:
-        #     current_bsz = min(batch_size, n_samples - total_generated)
-        #
-        #     # Fetch conditioning data
-        #     if cond_iter is not None:
-        #         batch = next(cond_iter)
-        #         tab_data = batch["tabular"][:current_bsz].to(device, dtype=self._dtype)
-        #         condition_keys = batch.get("dir", None)  # e.g. file paths / IDs
-        #         if condition_keys is None:
-        #             condition_keys = [f"cond_{i}" for i in range(current_bsz)]
-        #         else:
-        #             condition_keys = condition_keys[:current_bsz]
-        #     else:
-        #         ds = data_bucket.data_source
-        #         ds_size = len(ds)
-        #         idxs = torch.randint(0, ds_size, (current_bsz,))
-        #         idxs = idxs.cpu().numpy()
-        #
-        #         tab_list = []
-        #         condition_keys = []
-        #         for i_idx in idxs:
-        #             item = ds[i_idx]
-        #             if data_bucket.label == DataLabel.TAB:
-        #                 tab_list.append(item)
-        #             else:
-        #                 tab_list.append(item[1])
-        #             condition_keys.append(i_idx)  # track the index
-        #
-        #         tab_data = torch.stack(tab_list, dim=0).to(device, dtype=self._dtype)
-        #
-        #     # Store this batch's tab_data for later
-        #     all_tab_data.append(tab_data.clone().cpu())
-        #
-        #     # Run EDM sampling for this batch
-        #     final_latents = self._sample_edm(
-        #         table_data=tab_data,
-        #         batch_size=current_bsz,
-        #         cfg=cfg,
-        #         steps=steps,
-        #         device=device,
-        #     )
-        #
-        #     # Decode pixel-space images with VAE
-        #     decoded_imgs = decode_latents(vae, final_latents, vae.config.scaling_factor)
-        #     all_decoded_imgs.append(decoded_imgs)
-        #
-        #     # Track mapping from condition keys -> generated sample indices
-        #     for i, ck in enumerate(condition_keys):
-        #         ck = str(ck)  # ensure it's hashable (e.g. string)
-        #         if ck not in cond_mapping:
-        #             cond_mapping[ck] = []
-        #         cond_mapping[ck].append(global_index + i)
-        #
-        #     global_index += current_bsz
-        #     total_generated += current_bsz
-        #
-        # # Combine all decoded images into one tensor: (#samples, C, H, W)
-        # final_images = torch.cat(all_decoded_imgs, dim=0)[:n_samples]
-        #
-        # # Combine all tab data (so that it has the same #samples shape)
-        # final_tab_data = torch.cat(all_tab_data, dim=0)[:n_samples]
-        #
-        # # Build DataBucket for the generated images
-        # output_data = [final_images[i] for i in range(n_samples)]
-        # result_bucket = DataBucket(data_source=output_data, label=DataLabel.IMAGE)
-        #
-        # # Build DataBucket for the input tab data
-        # input_data = [final_tab_data[i] for i in range(n_samples)]
-        # input_bucket = DataBucket(data_source=input_data, label=DataLabel.TAB)
-        #
-        # return result_bucket, cond_mapping, input_bucket
-
 
         # 1) Check that data_bucket is labeled for tabular usage
         if data_bucket.label not in (DataLabel.TAB, DataLabel.BOTH):
