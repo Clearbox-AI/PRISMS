@@ -1,0 +1,20 @@
+# Case 1: SourceType = FOLDER
+# real_data.yaml
+artifact_key: "real_data_folder"
+source_type: "folder"   # Tells the pipeline to use DataBucket(SourceType.FOLDER)
+data_label: "both"      # We expect both images + tab files in each patient subfolder
+folder_path: "/path/to/folder/of/patients"
+
+
+
+# Case 2: SourceType = NACC
+# real_nacc_data.yaml
+artifact_key: "my_nacc_data"
+source_type: "nacc"         # Tells pipeline to use DataBucket(SourceType.NACC)
+data_label: "both"
+# We might pass additional info to construct the NaccDataset
+# e.g. which version, which transforms, etc.
+nacc_params:
+  version: "v1.2"
+  transform: "some_transform"
+  # or any other parameters you want to pass into NaccDataset constructor

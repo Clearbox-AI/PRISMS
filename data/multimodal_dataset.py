@@ -7,16 +7,7 @@ from enum import Enum
 from typing import Union, List, Optional, Dict, Any
 from data.nacc_dataset import NaccDataset
 from torch.utils.data import DataLoader
-
-class SourceType(Enum):
-    NACC = "nacc"   # wraps a NaccDataset
-    FOLDER = "folder"  # raw "patient_xxx" folder approach
-    LIST = "list"      # in-memory list of items
-
-class DataLabel(Enum):
-    IMAGE = "image"
-    TAB = "tab"
-    BOTH = "both"
+from enums.generation import SourceType, DataLabel
 
 
 
@@ -355,5 +346,31 @@ def main():
     print("tabular shape:", None if sample["tabular"] is None else sample["tabular"].shape, "\n")
 
 
+def test_databucket_folder(tmp_path):
+    # Create a dummy folder structure
+    patient0 = tmp_path / "patient_000"
+    patient0.mkdir()
+    # Save a .npy image
+    img = torch.randn(3, 128, 128).numpy()
+    npy_path = patient0 / "image.npy"
+    npy_path.write_bytes(img.tobytes())  # or use np.save(npy_path, img)
+    # Save a .json tab file
+    tab_data = [1,2,3]
+    with open(patient0 / "tab.json", "w") as f:
+        json.dump(tab_data, f)
+
+    # Build the DataBucket
+    bucket = DataBucket(
+        source_type=SourceType.FOLDER,
+        label=DataLabel.BOTH,
+        folder_path=str(tmp_path)
+    )
+    assert len(bucket) == 1
+    sample = bucket[0]
+    assert "image" in sample and "tabular" in sample
+    assert sample["image"].shape == (3, 128, 128)
+    assert sample["tabular"].shape[0] == 3
+    assert sample["dir"] is not None
+
 if __name__ == "__main__":
-    main()
+    ...
