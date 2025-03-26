@@ -3,37 +3,19 @@ from typing import Dict, Any, List
 from data.artifact_store import ArtifactStore
 from data.data_bucket import DataBucket
 from enums.metrics import MetricRequirementType, MetricType
-from data.data_operations import load_generated_data, load_data_from_config, get_model_for_metric
 from utils.configurations import load_hydra_config
+from evaluation.metrics.base_metric import BaseMetric
+from data.data_operations import load_data_from_config, load_generated_data, get_model_for_metric
 
 class MetricManager:
-    """
-    Responsible for:
-      1) Identifying the requirements for a given metric (FID, Accuracy, etc.).
-      2) Fetching/creating the required data (real, generated, model, etc.).
-      3) Calling the appropriate function to compute the metric.
-    """
-
-    def __init__(self):
+    def __init__(self, metrics: List[BaseMetric]):
         """
-        Construct a DAG for each metric in a dictionary:
-          self.dag_map[MetricType] = { <requirement>: [list_of_dependency_requirements], ... }
+        Initialize with a list of available metric classes/instances.
+        We'll store them in a dict keyed by metric_type.
         """
-        self.dag_map = {
-            MetricType.FID: {
-                # REAL_DATA has no dependencies
-                MetricRequirementType.REAL_DATA: [],
-                # GENERATED_DATA depends on REAL_DATA
-                MetricRequirementType.GENERATED_DATA: [MetricRequirementType.REAL_DATA],
-            },
-            MetricType.Other: {
-                # For example, let's say other needs REAL_DATA and GROUND_TRUTH_LABELS first
-                MetricRequirementType.REAL_DATA: [],
-                MetricRequirementType.GROUND_TRUTH_LABELS: [MetricRequirementType.REAL_DATA],
-                MetricRequirementType.ML_MODEL: [MetricRequirementType.REAL_DATA, MetricRequirementType.GROUND_TRUTH_LABELS],
-                # or any other structure needed
-            }
-        }
+        self.metric_map = {}
+        for metric in metrics:
+            self.metric_map[metric.metric_type] = metric
 
     def compute_metric(
         self,
@@ -43,22 +25,19 @@ class MetricManager:
         force: bool = False
     ) -> float:
         """
-        Main entry point for computing a metric. We:
-          1) Build or retrieve the DAG for the chosen metric_type.
-          2) Topologically sort it.
-          3) For each requirement in the sorted list, fetch/construct the resource.
-          4) Then call the appropriate compute function.
+        Given a metric_type, we find the corresponding metric object,
+        topologically sort its DAG, fetch the requirements, then call its compute().
         """
-        if metric_type not in self.dag_map:
-            raise ValueError(f"No DAG found for metric type {metric_type}")
+        metric_obj = self.metric_map.get(metric_type)
+        if metric_obj is None:
+            raise ValueError(f"No metric defined for metric_type {metric_type}")
 
-        dag = self.dag_map[metric_type]
-
-        # Topologically sort the DAG
+        # 1) Topologically sort this metric's DAG
+        dag = metric_obj.dag
         sorted_requirements = self._topological_sort(dag)
 
-        # Now fetch each requirement
-        resources = {}
+        # 2) Fetch each requirement in that order
+        resources: Dict[MetricRequirementType, Any] = {}
         for req_type in sorted_requirements:
             self._fetch_requirement(
                 store=store,
@@ -68,47 +47,26 @@ class MetricManager:
                 force=force
             )
 
-        # Dispatch to the correct compute method
-        if metric_type == MetricType.FID:
-            return self._compute_fid(
-                real_data=resources[MetricRequirementType.REAL_DATA],
-                generated_data=resources[MetricRequirementType.GENERATED_DATA]
-            )
-        elif metric_type == MetricType.Other:
-            return self._compute_other(
-                real_data=resources[MetricRequirementType.REAL_DATA],
-                ground_truth=resources[MetricRequirementType.GROUND_TRUTH_LABELS],
-                model=resources[MetricRequirementType.ML_MODEL]
-            )
-        else:
-            raise ValueError(f"Unsupported metric: {metric_type}")
-
+        # 3) Finally, compute the metric
+        return metric_obj.compute(resources)
 
     def _topological_sort(self, dag: Dict[MetricRequirementType, List[MetricRequirementType]]) -> List[MetricRequirementType]:
         """
-        Standard topological sort for a DAG given as an adjacency list:
+        Standard in-degree approach.
         dag[node] = [list_of_dependencies].
-        That means we must process each item in 'dag[node]' before 'node'.
-
-        The result is a list of nodes in dependency order: each node appears
-        after all of its dependencies.
         """
-        # We'll do a DFS-based topological sort or a standard in-degree approach.
-        # Here is an in-degree approach:
         in_degree_map = {node: 0 for node in dag}
         for node, deps in dag.items():
             for dep in deps:
-                in_degree_map[node] = in_degree_map[node] + 1
+                in_degree_map[node] += 1
 
-        # Initialize a queue with all nodes that have in-degree=0
         queue = [n for n, deg in in_degree_map.items() if deg == 0]
         topo_order = []
 
         while queue:
             current = queue.pop()
             topo_order.append(current)
-            # Now reduce in-degree of all nodes that depend on 'current'
-            # i.e., find all nodes for which 'current' is a dependency
+            # reduce in-degree of all nodes that depend on 'current'
             for node, deps in dag.items():
                 if current in deps:
                     in_degree_map[node] -= 1
@@ -119,27 +77,25 @@ class MetricManager:
             raise ValueError("Cycle detected or the DAG is incomplete.")
         return topo_order
 
-
     def _fetch_requirement(
         self,
         store: "ArtifactStore",
         req_type: MetricRequirementType,
         config: Dict[str, Any],
         resources: Dict[MetricRequirementType, Any],
-        force: bool = False
-    ) -> None:
+        force: bool
+    ):
         """
-        Retrieve or create the resource for a single requirement.
-        We can read from 'resources' to get any already-fetched dependencies.
-        Then we store the final object in resources[req_type].
+        Retrieve or create the resource for a single requirement,
+        storing it in resources[req_type].
         """
+
         if req_type == MetricRequirementType.REAL_DATA:
             real_cfg = config["real_data"]
             resources[MetricRequirementType.REAL_DATA] = load_data_from_config(store, real_cfg, force=force)
 
         elif req_type == MetricRequirementType.GENERATED_DATA:
             gen_cfg = config["gen_data"]
-            # Possibly read "condition_bucket" from real data if needed
             cond_bucket = resources.get(MetricRequirementType.REAL_DATA)
             resources[MetricRequirementType.GENERATED_DATA] = load_generated_data(
                 store=store,
@@ -149,7 +105,6 @@ class MetricManager:
             )
 
         elif req_type == MetricRequirementType.GROUND_TRUTH_LABELS:
-            # TODO: the following is an example, to complete for future metrics
             real_data_bucket = resources[MetricRequirementType.REAL_DATA]
             if real_data_bucket.metadata and "labels" in real_data_bucket.metadata:
                 resources[MetricRequirementType.GROUND_TRUTH_LABELS] = real_data_bucket.metadata["labels"]
@@ -158,8 +113,6 @@ class MetricManager:
 
         elif req_type == MetricRequirementType.ML_MODEL:
             model_cfg = config["model"]
-            # The model might rely on real_data or generated_data (depending on your pipeline)
-            # Example: Let's say we train on real_data
             training_data = resources.get(MetricRequirementType.REAL_DATA)
             model_obj = get_model_for_metric(
                 store=store,
@@ -172,25 +125,17 @@ class MetricManager:
         else:
             raise ValueError(f"Unknown requirement type: {req_type}")
 
-
-    def _compute_FID(self, real_data: "DataBucket", generated_data: "DataBucket") -> float:
-        print("[_compute_fid] Called with real_data and generated_data.")
-        return ...
-
-    def _compute_other(
-        self,
-        real_data: "DataBucket",
-        ground_truth: Any,
-        model: Any
-    ) -> float:
-        print("[_compute_other] Called with real_data, ground_truth, model.")
-        return ...
-
 if __name__ == "__main__":
     from data.artifact_store import ArtifactStore
+    from evaluation.metrics.FID import FidMetric
+    from evaluation.metrics.other import OtherMetric
+
+    # Instantiate your metric classes
+    fid_metric = FidMetric()
+    other_metric = OtherMetric()
+    manager = MetricManager(metrics=[fid_metric, other_metric])
 
     store = ArtifactStore(artifact_root="/mnt/dataset_storage/artifact_store")
-    manager = MetricManager()
 
     fid_config = load_hydra_config("metrics", "FID_nacc_tab_cond_gen")
 
