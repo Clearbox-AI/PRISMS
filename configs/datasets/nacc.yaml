@@ -1,22 +1,22 @@
 data:
   # locations
-  data_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
+  data_dir: "/mnt/dataset_storage/data/adni_nacc_processing_steps/final_2d" #"/mnt/dataset_storage/data/lumir_mm_dataset_middle_slice" #"/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
   stats_file: "" #"..data/computations/nacc_stats.json"
   # dimensions
   image_size: 32
   image_height: 256
   image_width: 256
   target_channels: 3
-  latent_channels: 4
-  tab_size: 174
   # dataloader
-  batch_size: 4
-  num_workers: 0
+  dataset_type: "nacc"
+  batch_size: 16
+  num_workers: 4
   # processing
   domain: "mri"
   final_image_range: "minus1to1"
   do_image_normalize: true
   do_tabular_normalize: true
   do_augment: false
+  shuffle: True
   # debugging
   debug: false
