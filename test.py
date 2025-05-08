@@ -1,6 +1,8 @@
 from typing import Tuple
 import os
 from pathlib import Path
+import itertools
+import random
 
 import polars as pl
 
@@ -23,6 +25,9 @@ from sure.privacy import distance_to_closest_record, dcr_stats, number_of_dcr_eq
 from sure import report
 
 class Metrics:
+    """
+    Class to compute metrics for tabular and image data.
+    """
     def __init__(
             self, 
             train_loader: torch.utils.data.dataloader.DataLoader, 
@@ -38,25 +43,15 @@ class Metrics:
             synth_loader (torch.utils.data.dataloader.DataLoader): DataLoader for the synthetic data.
             preprocessor (Preprocessor, optional): Preprocessor instance for data preprocessing. Defaults to None.
         """
+        # Check if the device is available
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         # Load the training and synthetic data
-        images_train, real_df = self._extract_data_from_loader(train_loader)
-        images_synth, synth_df = self._extract_data_from_loader(synth_loader)
-        
-        # Drop the second channel if it exists
-        # if len(images_train.shape) == 4:
-        #     images_train = images_train[:, 0]
-        #     images_synth = images_synth[:, 0]
-
-        self.images_train = images_train
-        self.images_synth = images_synth
-
-        self.real_df = real_df
-        self.synth_df = synth_df
+        self.images_train, self.real_df = self._extract_data_from_loader(train_loader)
+        self.images_synth, self.synth_df = self._extract_data_from_loader(synth_loader)
 
         if valid_loader is not None:
             images_valid, valid_df = self._extract_data_from_loader(valid_loader)   
-            # if len(images_valid.shape) == 4:
-            #     images_valid = images_valid[:, 0]     
             self.images_valid = images_valid      
             self.valid_df = valid_df
 
@@ -84,6 +79,16 @@ class Metrics:
         return images, df
     
     def tabular(self, train_label=None, synth_label=None, valid_label=None):
+        """
+        Compute the tabular metrics (statistical metrics, mutual information, distance to closest record, TSTR) between the real and synthetic data.
+
+        Args:
+            train_label (torch.Tensor, optional): Labels for the training data. Defaults to None.
+            synth_label (torch.Tensor, optional): Labels for the synthetic data. Defaults to None.
+            valid_label (torch.Tensor, optional): Labels for the validation data. Defaults to None.
+        Returns:
+            dict: Dictionary containing the computed metrics.
+        """
         path_to_json = ""
         # Compute statistical metrics
         features_stats, _, _ = compute_statistical_metrics(self.real_df, self.synth_df, path_to_json=path_to_json)
@@ -151,73 +156,138 @@ class Metrics:
         report(self.real_df, self.synth_df)
 
     def images(self):
+        """
+        Compute the image metrics (SSIM, MS-SSIM, FID) between the real and synthetic images.
+        """
         data_range = 1.0 # Da mettere in config
+        num_samples = 1000 # Da mettere in config
+        metrics_batch_size = 32 # Da mettere in config
 
         # Compute SSIM
-        # ssim_score = self._ssim_score(self.images_valid, self.images_synth, data_range)
-        # msssim_train = self._ms_ssim_score(self.images_valid, self.images_synth, data_range=data_range)
+        ssim_score   = self._ssim_score(self.images_valid, self.images_synth, data_range=data_range, num_samples=num_samples)
+        msssim_train = self._ms_ssim_score(self.images_valid, self.images_synth, data_range=data_range, num_samples=num_samples)
 
         # Compute FID
-        fid_score = self._fid_score(self.images_valid, self.images_synth)
+        fid_score = self._fid_score(self.images_valid, self.images_synth, batch_size=metrics_batch_size)
 
         # Store the metrics in a dictionary
         self.metrics = {
-            # "ssim_mean": ssim_score,
-            # "ms_ssim_mean": msssim_train,
+            "ssim_mean": ssim_score,
+            "ms_ssim_mean": msssim_train,
             "fid_mean": fid_score
         }
         return self.metrics
 
-    def _get_nth_batch_norm(self, x, y, n, batch_size):
-        """
-        Get the normalized nth batch of data.
-        """
-        x_batch = x[n:n+batch_size]
-        y_batch = y[n:n+batch_size]
+    # def _get_nth_batch_norm(self, x, y, n, batch_size):
+    #     """
+    #     Get the normalized nth batch of data.
+    #     """
+    #     x_batch = x[n:n+batch_size]
+    #     y_batch = y[n:n+batch_size]
 
-        if x_batch.shape[0] != y_batch.shape[0]:
-            min_batch_size = min(x_batch.shape[0], y_batch.shape[0])
-            x_batch = x_batch[:min_batch_size]
-            y_batch = y_batch[:min_batch_size]
+    #     if x_batch.shape[0] != y_batch.shape[0]:
+    #         min_batch_size = min(x_batch.shape[0], y_batch.shape[0])
+    #         x_batch = x_batch[:min_batch_size]
+    #         y_batch = y_batch[:min_batch_size]
         
-        # Normalization [0, 1]
-        x_batch = (x_batch + 1) / 2
-        y_batch = (y_batch + 1) / 2
+    #     # Normalization [0, 1]
+    #     x_batch = (x_batch + 1) / 2
+    #     y_batch = (y_batch + 1) / 2
 
-        return x_batch, y_batch
+    #     return x_batch, y_batch
 
-    def _ssim_score(self, x, y, data_range, batch_size=16):
+    def _ssim_score(self, x, y, data_range=1.0, num_samples=1000):
         """
-        Compute Structural Similarity Index
+        Sample unique, random (x[i], y[j]) pairs from two sets and compute SSIM.
+
+        Args:
+            x_set, y_set: Tensors of shape (N, C, H, W)
+            data_range: Pixel range of images (typically 1.0 if normalized)
+            num_samples: Number of unique pairs to evaluate
+            batch_size: Number of samples to process at once
+        Returns:
+            Average SSIM score over sampled unique pairs
         """
+        N_x = x.size(0)
+        N_y = y.size(0)
+
+        x = x.to(self.device)
+        y = y.to(self.device)
+
+        # Normalization
+        x = (x - x.min()) / (x.max() - x.min())
+        y = (y - y.min()) / (y.max() - y.min())
+
+        # All possible unique (i, j) pairs
+        all_pairs = list(itertools.product(range(N_x), range(N_y)))
+
+        if num_samples > len(all_pairs):
+            num_samples = len(all_pairs)
+        
+        sampled_pairs = random.sample(all_pairs, num_samples)
+
         scores = []
-        size = min(x.shape[0], y.shape[0])
-        for i in range(0, size, batch_size):
-            x_batch, y_batch = self._get_nth_batch_norm(x, y, i, batch_size)
+        for i, j in sampled_pairs:
+            x_img = x[i].unsqueeze(0)
+            y_img = y[j].unsqueeze(0)
+            score = ssim(x_img, y_img, data_range=data_range, reduction='none')
+            scores.append(score.item())
             
-            ssim_val = ssim(x_batch, y_batch, data_range=data_range)
-            scores.append(ssim_val)
-
-        return torch.stack(scores).mean()
+        return torch.tensor(scores).mean()
     
-    def _ms_ssim_score(self, x, y, data_range, batch_size=16):
+    def _ms_ssim_score(self, x, y, data_range=1.0, num_samples=1000):
         """
-        Compute Multi Scale Structural Similarity Index
-        """
-        scores = []
-        size = min(x.shape[0], y.shape[0])
-        for i in range(0, size, batch_size):
-            x_batch, y_batch = self._get_nth_batch_norm(x, y, i, batch_size)
+        Sample unique, random (x[i], y[j]) pairs from two sets and compute MS-SSIM.
 
-            ms_ssim_val = multi_scale_ssim(x_batch, y_batch, data_range=data_range)
-            scores.append(ms_ssim_val)
+        Args:
+            x_set, y_set: Tensors of shape (N, C, H, W)
+            data_range: Pixel range of images (typically 1.0 if normalized)
+            num_samples: Number of unique pairs to evaluate
+            batch_size: Number of samples to process at once
+        Returns:
+            Average MS-SSIM score over sampled unique pairs
+        """
+        N_x = x.size(0)
+        N_y = y.size(0)
+
+        x = x.to(self.device)
+        y = y.to(self.device)
+
+        # Normalization
+        x = (x - x.min()) / (x.max() - x.min())
+        y = (y - y.min()) / (y.max() - y.min())
+
+        # All possible unique (i, j) pairs
+        all_pairs = list(itertools.product(range(N_x), range(N_y)))
+
+        if num_samples > len(all_pairs):
+            num_samples = len(all_pairs)
+        
+        sampled_pairs = random.sample(all_pairs, num_samples)
+
+        scores = []
+        for i, j in sampled_pairs:
+            x_img = x[i].unsqueeze(0)
+            y_img = y[j].unsqueeze(0)
+            score = multi_scale_ssim(x_img, y_img, data_range=data_range, reduction='none')
+            scores.append(score.item())
             
-        return torch.stack(scores).mean()
+        return torch.tensor(scores).mean()
 
     def _fid_score(self, x, y, batch_size=32):
         """
         Compute Multi Scale Structural Similarity Index
+
+        Args:
+            x_set, y_set: Tensors of shape (N, C, H, W)
+            batch_size: Number of samples to process at once
+        Returns:
+            Average FID score over sampled unique pairs
         """
+        x = x.to(self.device)
+        y = y.to(self.device)
+
+        # Resize to the minum size between the two tensors
         min_size = min(x.shape[0], y.shape[0])
         x = x[:min_size]
         y = y[:min_size]
@@ -244,7 +314,7 @@ class Metrics:
         y_dataloader = DataLoader(y_dataset, batch_size=batch_size, shuffle=False)
 
         # # Load Inception model and extract features
-        feature_extractor = InceptionFID()
+        feature_extractor = InceptionFID(device=self.device)
 
         x_feats = self._extract_features(x_dataloader, feature_extractor)
         y_feats = self._extract_features(y_dataloader, feature_extractor)
@@ -254,25 +324,40 @@ class Metrics:
         return fid.compute_metric(x_feats, y_feats)
 
     def _extract_features(self, dataloader, feature_extractor):
+        """
+        Extract features from the dataloader using the feature extractor.
+        Args:
+            dataloader: DataLoader for the dataset.
+            feature_extractor: Feature extractor model.
+        Returns:
+            torch.Tensor: Extracted features.
+        """
         features = []
-
+        feature_extractor = feature_extractor.to(self.device)
         for batch in dataloader:
-            # batch = batch.cuda()
+            batch = batch.to(self.device)
             feats = feature_extractor(batch)
-            feats = feats.view(feats.size(0), -1) # Flatten
-            # features.append(feats.cpu())
-            features.append(feats)#.cpu())
-
+            feats = feats.view(feats.size(0), -1)
+            features.append(feats.cpu())  # Detach from GPU
         return torch.cat(features, dim=0).cpu()
+
     
 class InceptionFID(nn.Module):
-    def __init__(self):
+    """
+    Inception feature extractor for FID computation.
+    """
+    def __init__(self, device='cpu'):
+        """
+        Initialize the InceptionFID class.
+        Args:
+            device (str): Device to use for computation ('cpu' or 'cuda').
+        """
         super().__init__()
+        self.device = device
         weights = Inception_V3_Weights.DEFAULT
         inception = inception_v3(weights=weights, aux_logits=True, transform_input=False)
         inception.eval()
 
-        # Extract only convolutional layers up to AdaptiveAvgPool2d
         self.features = nn.Sequential(
             inception.Conv2d_1a_3x3,
             inception.Conv2d_2a_3x3,
@@ -293,20 +378,30 @@ class InceptionFID(nn.Module):
             inception.Mixed_7b,
             inception.Mixed_7c,
             nn.AdaptiveAvgPool2d((1, 1))
-        )
+        ).to(device)
 
-        # Optional: freeze params
         for param in self.features.parameters():
             param.requires_grad = False
 
     def forward(self, x):
+        """
+        Forward pass through the Inception model.
+        Args:
+            x (torch.Tensor): Input tensor.
+        Returns:
+            torch.Tensor: Extracted features.
+        """
         with torch.no_grad():
             x = self.features(x)
             x = torch.flatten(x, 1)
             return x
 
 
+
 class InceptionPreprocessedDataset(torch.utils.data.Dataset):
+    """
+    Dataset class for preprocessed images.
+    """
     def __init__(self, tensor):
         self.tensor = tensor
         self.mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -315,25 +410,26 @@ class InceptionPreprocessedDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         img = self.tensor[idx]
         img = F.interpolate(img.unsqueeze(0), size=(299, 299), mode='bilinear', align_corners=False).squeeze(0)
-        img = (img - self.mean) / self.std
+        img = (img - self.mean.to(img.device)) / self.std.to(img.device)
         return img
 
     def __len__(self):
         return self.tensor.shape[0]
         
 ##############################################################
-set_project_root()
 
-with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "datasets"))):
-    cfg = compose(config_name="nacc")  # Adjust if needed
-    OmegaConf.set_struct(cfg, False)
+if __name__ == "__main__":
+    set_project_root()
 
-train_loader = load_training_data(cfg)
-val_loader   = load_training_data(cfg)
-synth_loader = load_training_data(cfg)
+    with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "datasets"))):
+        cfg = compose(config_name="nacc")  # Adjust if needed
+        OmegaConf.set_struct(cfg, False)
 
-metrics_manager = Metrics(train_loader, synth_loader, val_loader)
-# tab_metrics = metrics_manager.tabular()
-img_metrics = metrics_manager.images()
-# metrics_manager.tab_report()
-a=1
+    train_loader = load_training_data(cfg)
+    val_loader   = load_training_data(cfg)
+    synth_loader = load_training_data(cfg)
+
+    metrics_manager = Metrics(train_loader, synth_loader, val_loader)
+    tab_metrics = metrics_manager.tabular()
+    img_metrics = metrics_manager.images()
+    metrics_manager.tab_report()
