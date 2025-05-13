@@ -249,7 +249,7 @@ if __name__ == "__main__":
 
 #################################################################################
 
-    train_discriminator = True
+    train_flag = True
     checkpoint_path = 'PRISMS/metrics/coherence/checkpoints/'
     discriminator_weights = 'coherence_discriminator_models_100epochs.pth'
     checkpoint_path_discriminator = os.path.join(checkpoint_path, discriminator_weights)
@@ -259,7 +259,7 @@ if __name__ == "__main__":
     shuffled_loader = create_shuffled_tabular_loader(train_loader, device=device)
 
     discriminator = Discriminator()
-    if train_discriminator:
+    if train_flag:
         discriminator.fit(train_loader, epochs=100, save_path=checkpoint_path_discriminator)
         coherence_scores = discriminator.evaluate(synth_loader)
         coherence_scores_ = discriminator.evaluate(shuffled_loader)

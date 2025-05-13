@@ -17,6 +17,9 @@ import torch.nn.functional as F
 
 from piq import ssim, multi_scale_ssim, FID
 
+from monai.networks.nets import densenet121
+from monai.transforms import Compose, Resize, ScaleIntensity, ToTensor
+
 from data.loader import load_training_data
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
@@ -166,17 +169,17 @@ class Metrics:
         metrics_batch_size = 32 # Da mettere in config
 
         # Compute SSIM
-        ssim_score   = self._ssim_score(self.images_valid, self.images_synth, data_range=data_range, num_samples=num_samples)
-        msssim_train = self._ms_ssim_score(self.images_valid, self.images_synth, data_range=data_range, num_samples=num_samples)
+        # ssim_score   = self._ssim_score(self.images_valid, self.images_synth, data_range=data_range, num_samples=num_samples)
+        # msssim_train = self._ms_ssim_score(self.images_valid, self.images_synth, data_range=data_range, num_samples=num_samples)
 
         # Compute FID
         fid_score = self._fid_score(self.images_valid, self.images_synth, batch_size=metrics_batch_size)
 
         # Store the metrics in a dictionary
         self.metrics = {
-            "ssim_mean": ssim_score,
-            "ms_ssim_mean": msssim_train,
-            # "fid_mean": fid_score
+            # "ssim_mean": ssim_score,
+            # "ms_ssim_mean": msssim_train,
+            "fid_mean": fid_score
         }
         return self.metrics
 
@@ -298,25 +301,26 @@ class Metrics:
         x = x.float()
         x_min = x.amin(dim=(2, 3), keepdim=True)
         x_max = x.amax(dim=(2, 3), keepdim=True)
-        x = (x - x_min) / (x_max - x_min)
+        x = (x - x_min) / (x_max - x_min + 1e-8)
 
         y = y.float()
         y_min = y.amin(dim=(2, 3), keepdim=True)
         y_max = y.amax(dim=(2, 3), keepdim=True)
-        y = (y - y_min) / (y_max - y_min)
+        y = (y - y_min) / (y_max - y_min + 1e-8)
 
         # If second dimension is 1, repeat it to make it 3
-        if x.shape[1] == 1:
-            x = x.repeat(1, 3, 1, 1)
-            y = y.repeat(1, 3, 1, 1)
+        # if x.shape[1] == 1:
+        #     x = x.repeat(1, 3, 1, 1)
+        #     y = y.repeat(1, 3, 1, 1)
 
-        x_dataset = InceptionPreprocessedDataset(x)
-        y_dataset = InceptionPreprocessedDataset(y)
+        x_dataset = DenseNetPreprocessedDataset(x)
+        y_dataset = DenseNetPreprocessedDataset(y)
         x_dataloader = DataLoader(x_dataset, batch_size=batch_size, shuffle=False)
         y_dataloader = DataLoader(y_dataset, batch_size=batch_size, shuffle=False)
 
-        # # Load Inception model and extract features
-        feature_extractor = InceptionFID(device=self.device)
+        # # Load DenseNet121FID model and extract features
+        # feature_extractor = InceptionFID(device=self.device)
+        feature_extractor = DenseNet121FID(device=self.device)
 
         x_feats = self._extract_features(x_dataloader, feature_extractor)
         y_feats = self._extract_features(y_dataloader, feature_extractor)
@@ -399,7 +403,6 @@ class InceptionFID(nn.Module):
             return x
 
 
-
 class InceptionPreprocessedDataset(torch.utils.data.Dataset):
     """
     Dataset class for preprocessed images.
@@ -418,6 +421,44 @@ class InceptionPreprocessedDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.tensor.shape[0]
         
+class DenseNetPreprocessedDataset(torch.utils.data.Dataset):
+    """
+    Dataset that resizes images for DenseNet121 without redundant normalization.
+    """
+    def __init__(self, tensor):
+        self.tensor = tensor
+
+    def __getitem__(self, idx):
+        img = self.tensor[idx]  # shape: (1, H, W)
+        img = F.interpolate(img.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False).squeeze(0)
+        return img
+
+    def __len__(self):
+        return self.tensor.shape[0]
+
+class DenseNet121FID(nn.Module):
+    """
+    DenseNet121-based feature extractor for FID computation.
+    """
+    def __init__(self, in_channels=1, device='cpu'):
+        super().__init__()
+        model = densenet121(spatial_dims=2, in_channels=in_channels, out_channels=1, pretrained=True)
+        model.eval()
+
+        self.features = nn.Sequential(
+            model.features,
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1))  # output shape (N, 1024, 1, 1)
+        ).to(device)
+
+        for param in self.features.parameters():
+            param.requires_grad = False
+
+    def forward(self, x):
+        with torch.no_grad():
+            x = self.features(x)
+            x = torch.flatten(x, 1)  # shape (N, 1024)
+            return x
 ##############################################################
 
 if __name__ == "__main__":
@@ -435,3 +476,4 @@ if __name__ == "__main__":
     # tab_metrics = metrics_manager.tabular()
     img_metrics = metrics_manager.images()
     # metrics_manager.tab_report()
+    a = 0
