@@ -4,11 +4,6 @@ import sys
 prisms_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.append(prisms_path)
 
-from data.loader import load_training_data
-from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
-from utils.configurations import set_project_root
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -83,7 +78,7 @@ class Discriminator(nn.Module):
         z = torch.cat([z_img, z_tab], dim=1)   # (B, 2*embed_dim)
         return self.classifier(z)              # (B, 1)  prob of “coherent”
 
-    def fit(self,
+    def _fit(self,
               dataloader,
               epochs: int = 10,
               save_path: str = "coherence_discriminator.pth",
@@ -144,7 +139,7 @@ class Discriminator(nn.Module):
             print(f"Epoch {epoch+1}/{epochs}  |  loss={total_loss:.4f}  |  AUC={auc:.4f}")
 
         torch.save(self.state_dict(), save_path)
-        print(f"Full model saved to →  {save_path}")
+        print(f"✓ Full model saved to →  {save_path}")
 
     def _load_discriminator_models(self,
                                    checkpoint_path: str):
@@ -160,26 +155,50 @@ class Discriminator(nn.Module):
         self.eval()
         self.image_encoder.eval()
         self.tabular_encoder.eval()
-        print(f"Full model loaded from ←  {checkpoint_path}")
+        print(f"✓ Full model loaded from ←  {checkpoint_path}")
 
     @torch.no_grad()
     def evaluate(self,
                  loader,
-                 checkpoint_path: str | None = None):
+                 checkpoint_path: str | None = None,
+                 train_flag:   bool = False,
+                 epochs:       int  = 10
+        ) -> float:
         """
         Evaluate coherence scores (probabilities ∈ [0,1]) for every
         (image, tabular) pair in `loader`.
-        If `checkpoint_path` is supplied, the model weights are loaded first.
-
+        If `train_flag` is True, the model is trained on the provided
+        dataloader for `epochs` epochs and saved to `checkpoint_path`.
+        If `train_flag` is False, the model is loaded from `checkpoint_path`.
+        The model is set to evaluation mode.
+        The dataloader should yield batches with 'image' and 'tabular' keys.
+        
         Args:
             loader: DataLoader yielding batches as dicts
-            checkpoint_path: path to saved model weights (optional)
+            checkpoint_path: path to saved model weights
+            train_flag: if True, train the model; if False, load the model
+            epochs: number of training epochs (only used if train_flag is True)
         Returns:
-            List of coherence scores for each batch in the loader.
+            Average coherence score for the entire dataset.
         """
-        if checkpoint_path:
+        if train_flag:
+            self._fit(loader, epochs, checkpoint_path)
+        else:
             self._load_discriminator_models(checkpoint_path)
 
+        return self._discriminator_score(loader)
+        
+    def _discriminator_score(self, loader: DataLoader) -> float:
+        """
+        Compute the coherence score for the provided dataloader.
+        The dataloader should yield batches with 'image' and 'tabular' keys.
+        The model is set to evaluation mode.
+        
+        Args:
+            loader: DataLoader yielding batches as dicts
+        Returns:
+            Average coherence score for the entire dataset.
+        """
         self.eval()
         self.image_encoder.eval()
         self.tabular_encoder.eval()
@@ -194,7 +213,7 @@ class Discriminator(nn.Module):
             y_pred = self(z_img, z_tab)           # (B,1)
             scores.extend(y_pred.squeeze().tolist())
 
-        return scores
+        return sum(scores)/len(scores)
 
 def create_shuffled_tabular_loader(original_loader):
     """
@@ -238,35 +257,3 @@ def create_shuffled_tabular_loader(original_loader):
     shuffled_loader = DataLoader(dataset, batch_size=original_loader.batch_size,
                                  shuffle=False, collate_fn=collate_fn)
     return shuffled_loader
-
-if __name__ == "__main__":
-    set_project_root()
-
-    with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "datasets"))):
-        cfg = compose(config_name="nacc")  # Adjust if needed
-        OmegaConf.set_struct(cfg, False)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    train_flag = True
-    checkpoint_path = 'PRISMS/metrics/coherence/checkpoints/'
-    discriminator_weights = 'coherence_discriminator_models_100epochs.pth'
-    checkpoint_path_discriminator = os.path.join(checkpoint_path, discriminator_weights)
-
-    train_loader = load_training_data(cfg)
-    synth_loader = load_training_data(cfg)
-    shuffled_loader = create_shuffled_tabular_loader(train_loader)
-
-    discriminator = Discriminator()
-    if train_flag:
-        discriminator.fit(train_loader, epochs=100, save_path=checkpoint_path_discriminator)
-        coherence_scores = discriminator.evaluate(synth_loader)
-        coherence_scores_ = discriminator.evaluate(shuffled_loader)
-    else:
-        coherence_scores = discriminator.evaluate(synth_loader, checkpoint_path=checkpoint_path_discriminator)
-        coherence_scores_ = discriminator.evaluate(shuffled_loader, checkpoint_path=checkpoint_path_discriminator)
-
-    import numpy as np
-    print('Coherence Scores')
-    print('Original data: ', np.mean(coherence_scores))
-    print('Shuffled data: ', np.mean(coherence_scores_))

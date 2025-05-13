@@ -3,7 +3,6 @@ import os
 import sys 
 prisms_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(prisms_path)
-from pathlib import Path
 import itertools
 import random
 
@@ -11,19 +10,12 @@ import polars as pl
 
 import torch
 from torch.utils.data import DataLoader
-from torchvision.models import inception_v3, Inception_V3_Weights
 import torch.nn as nn
 import torch.nn.functional as F
 
 from piq import ssim, multi_scale_ssim, FID
 
 from monai.networks.nets import densenet121
-from monai.transforms import Compose, Resize, ScaleIntensity, ToTensor
-
-from data.loader import load_training_data
-from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
-from utils.configurations import set_project_root
 
 from sure.utility import compute_statistical_metrics, compute_mutual_info, compute_utility_metrics_class
 from sure.privacy import distance_to_closest_record, dcr_stats, number_of_dcr_equal_to_zero, validation_dcr_test
@@ -112,12 +104,6 @@ class Metrics:
             dcr_share             = validation_dcr_test(dcr_synth_train, dcr_synth_valid, path_to_json=path_to_json)
 
         # TSTR
-        ############
-        import numpy as np
-        train_label = np.random.randint(0, 2, size=len(self.real_df))
-        synth_label = np.random.randint(0, 2, size=len(self.synth_df))
-        valid_label = np.random.randint(0, 2, size=len(self.valid_df)) if self.valid_df is not None else None
-        ############
         if train_label is not None:
             X_train = self.real_df
             y_train = train_label
@@ -384,21 +370,3 @@ class DenseNet121FID(nn.Module):
             x = self.features(x)
             x = torch.flatten(x, 1)  # shape (N, 1024)
             return x
-##############################################################
-
-if __name__ == "__main__":
-    set_project_root()
-
-    with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "datasets"))):
-        cfg = compose(config_name="nacc")  # Adjust if needed
-        OmegaConf.set_struct(cfg, False)
-
-    train_loader = load_training_data(cfg)
-    val_loader   = load_training_data(cfg)
-    synth_loader = load_training_data(cfg)
-
-    metrics_manager = Metrics(train_loader, synth_loader, val_loader)
-    tab_metrics = metrics_manager.tabular()
-    img_metrics = metrics_manager.images()
-    metrics_manager.tab_report()
-    a = 0

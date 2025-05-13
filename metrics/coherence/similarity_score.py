@@ -5,18 +5,11 @@ import sys
 prisms_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.append(prisms_path)
 
-from data.loader import load_training_data
-from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
-from utils.configurations import set_project_root
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import tqdm
-
-from discriminator_score import create_shuffled_tabular_loader
 
 class ImageEncoder(nn.Module):
     """
@@ -90,28 +83,29 @@ class Similarity:
 
     def evaluate(self,
                  loader:       DataLoader,
-                 checkpoint:   str,
+                 checkpoint_path:   str,
                  train_flag:   bool = False,
-                 epochs:       int  = 10) -> float:
+                 epochs:       int  = 10
+        ) -> float:
         """
         - If `train_flag` is True  → trains encoders with `epochs`
-          and saves them to `checkpoint`.
-        - If `train_flag` is False → loads encoders from `checkpoint`.
+          and saves them to `checkpoint_path`.
+        - If `train_flag` is False → loads encoders from `checkpoint_path`.
 
         Args:
             loader: DataLoader yielding batches as dicts
-            checkpoint: path to save/load the trained model
+            checkpoint_path: path to save/load the trained model
             train_flag: whether to train new encoders or load existing ones
             epochs: number of training epochs (only used if `train_flag` is True)
         Returns:
             mean similarity score: average cosine similarity between mapped between 0 and 1.
         """
         if train_flag:
-            self._train_similarity(loader, epochs, checkpoint)
+            self._train_similarity(loader, epochs, checkpoint_path)
         else:
-            self._load_encoders(checkpoint)
+            self._load_encoders(checkpoint_path)
 
-        return self._similarity_scores(loader)
+        return self._similarity_score(loader)
 
     def _train_similarity(self,
                           loader: DataLoader,
@@ -168,11 +162,10 @@ class Similarity:
         self.img_enc.load_state_dict(state["img_enc"])
         self.tab_enc.load_state_dict(state["tab_enc"])
         self.img_enc.eval(); self.tab_enc.eval()
-        print(f"✓ encoders loaded ← {os.path.abspath(checkpoint)}")
+        print(f"✓ Encoders loaded ← {os.path.abspath(checkpoint)}")
 
     @torch.no_grad()
-    def _similarity_scores(self,
-                           loader: DataLoader) -> float:
+    def _similarity_score(self, loader: DataLoader) -> float:
         """
         Cosine similarities mapped to [0,1].
         Args:
@@ -180,9 +173,10 @@ class Similarity:
         Returns:
             Mean cosine similarities for each batch in the loader.
         """
-        self.img_enc.eval(); self.tab_enc.eval()
+        self.img_enc.eval()
+        self.tab_enc.eval()
         sims = []
-        for batch in tqdm.tqdm(loader, desc="scoring"):
+        for batch in tqdm.tqdm(loader, desc="Evaluating"):
             img = batch["image"].to(self.device)
             tab = batch["tabular"].to(self.device)
 
@@ -191,34 +185,3 @@ class Similarity:
             cos   = F.cosine_similarity(z_img, z_tab, dim=1)  # [-1,1]
             sims.extend(((cos + 1) / 2).cpu().tolist())        # cosine similarity normalization → [0,1]
         return sum(sims)/len(sims)
-
-if __name__ == "__main__":
-    set_project_root()
-
-    with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "datasets"))):
-        cfg = compose(config_name="nacc")  # Adjust if needed
-        OmegaConf.set_struct(cfg, False)
-
-    # params
-    checkpoint_path = 'PRISMS/metrics/coherence/checkpoints/'
-    similarity_weights = 'coherence_similarity_models_10epochs.pth'
-    checkpoint_path_similarity_weights = os.path.join(checkpoint_path, similarity_weights)
-    train_flag = False
-    dim         = 128
-    epochs      = 10
-    lr          = 1e-4
-
-    train_loader = load_training_data(cfg)
-    shuffled_loader = create_shuffled_tabular_loader(train_loader)
-
-    similarity = Similarity(dim=128, lr=1e-4)
-    real_sim = similarity.evaluate(loader  = train_loader,
-                             checkpoint    = checkpoint_path_similarity_weights,
-                             train_flag    = train_flag)
-    
-    synth_sim = similarity.evaluate(loader = shuffled_loader,
-                             checkpoint    = checkpoint_path_similarity_weights,
-                             train_flag    = False)
-    
-    print(f"mean real   similarity: {real_sim:.3f}")
-    print(f"mean synthetic similarity: {synth_sim:.3f}")
