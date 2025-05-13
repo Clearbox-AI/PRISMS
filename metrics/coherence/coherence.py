@@ -16,19 +16,19 @@ import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 import tqdm
 
-# -----------------------------
-# Model Definitions
-# -----------------------------
-
 class ImageEncoder(nn.Module):
-    def __init__(self, output_dim=128):
+    """
+    Simple CNN for encoding images.
+    The input dimension is (1, 256, 256) and the output dimension is 128.
+    """
+    def __init__(self, output_dim: int = 128):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 16, 3, stride=2, padding=1),
+            nn.Conv2d(1, 16, 3, stride=2, padding=1),  # (B,16,128,128)
             nn.ReLU(),
-            nn.Conv2d(16, 32, 3, stride=2, padding=1),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), # (B,32,64,64)
             nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1), # (B,64,32,32)
             nn.ReLU(),
             nn.Flatten(),
             nn.Linear(64 * 32 * 32, output_dim)
@@ -39,7 +39,11 @@ class ImageEncoder(nn.Module):
 
 
 class TabularEncoder(nn.Module):
-    def __init__(self, input_dim=157, output_dim=128):
+    """
+    Simple MLP for encoding tabular data.
+    The input dimension is 157 (as per the original code) and the output dimension is 128.
+    """
+    def __init__(self, input_dim: int = 157, output_dim: int = 128):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 256),
@@ -52,153 +56,145 @@ class TabularEncoder(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, embed_dim=128):
+    """
+    Full coherence-discriminator pipeline:
+    image_encoder + tabular_encoder + classifier.
+    The classifier is a simple MLP that takes the concatenated
+    outputs of the image and tabular encoders. 
+    The model is trained to distinguish between coherent
+    (image, tabular) pairs and incoherent pairs.
+    """
+    def __init__(self, embed_dim: int = 128):
         super().__init__()
-        self.classifier = nn.Sequential(
+
+        self.image_encoder   = ImageEncoder(output_dim=embed_dim)
+        self.tabular_encoder = TabularEncoder(output_dim=embed_dim)
+        self.classifier      = nn.Sequential(
             nn.Linear(2 * embed_dim, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
             nn.Sigmoid()
         )
 
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.to(self.device)
+
     def forward(self, z_img, z_tab):
-        z = torch.cat([z_img, z_tab], dim=1)
-        return self.classifier(z)
+        z = torch.cat([z_img, z_tab], dim=1)   # (B, 2*embed_dim)
+        return self.classifier(z)              # (B, 1)  prob of “coherent”
 
-# Training Function
-def train_discriminator(dataloader, epochs=10, device='cuda', save_path=''):
-    """
-    Train the coherence discriminator on the provided dataloader.
-    Args:
-        dataloader: DataLoader yielding batches with 'image' and 'tabular'
-        epochs: number of training epochs
-        device: device to run the training on
-        save_path: path to save the trained models
-    Returns:
-        image_encoder: trained ImageEncoder model
-        tabular_encoder: trained TabularEncoder model
-        discriminator: trained Discriminator model
-    """
-    image_encoder = ImageEncoder().to(device)
-    tabular_encoder = TabularEncoder().to(device)
-    discriminator = Discriminator().to(device)
+    def fit(self,
+              dataloader,
+              epochs: int = 10,
+              save_path: str = "coherence_discriminator.pth",
+              lr: float = 1e-4):
+        """
+        Train the coherence discriminator on the provided dataloader.
+        The dataloader should yield batches with 'image' and 'tabular' keys.
+        The model is saved to `save_path` after training.
+        
+        Args:
+            dataloader: DataLoader yielding batches as dicts
+            epochs: number of training epochs
+            save_path: path to save the trained model
+            lr: learning rate for the optimizer
+        """
+        self.to(self.device)          # make sure all submodules are on the same device
+        self.image_encoder.train()
+        self.tabular_encoder.train()
+        super().train()               # sets classifier to train mode
 
-    all_params = list(image_encoder.parameters()) + list(tabular_encoder.parameters()) + list(discriminator.parameters())
-    optimizer = torch.optim.Adam(all_params, lr=1e-4)
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
 
-    for epoch in range(epochs):
-        y_true_all = []
-        y_pred_all = []
-        total_loss = 0.0
+        for epoch in range(epochs):
+            y_true_all, y_pred_all = [], []
+            total_loss = 0.0
 
-        for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}"):
-            x_img = batch['image'].to(device)
-            x_tab = batch['tabular'].to(device)
-            B = x_img.size(0)
+            for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}"):
+                x_img = batch['image'].to(self.device)     # (B,1,256,256)
+                x_tab = batch['tabular'].to(self.device)   # (B,157)
+                B     = x_img.size(0)
 
-            # Positive pairs
-            y_pos = torch.ones(B, 1).to(device)
+                # build positive / negative pairs
+                y_pos  = torch.ones(B, 1, device=self.device)
+                perm   = torch.randperm(B, device=self.device)
+                x_tab_neg = x_tab[perm]
+                y_neg  = torch.zeros(B, 1, device=self.device)
 
-            # Negative pairs: shuffled tabular
-            perm = torch.randperm(B)
-            x_tab_neg = x_tab[perm]
-            y_neg = torch.zeros(B, 1).to(device)
+                x_img_all = torch.cat([x_img, x_img], dim=0)          # 2B
+                x_tab_all = torch.cat([x_tab, x_tab_neg], dim=0)      # 2B
+                y_all     = torch.cat([y_pos, y_neg],  dim=0)         # 2B,1
 
-            # Combine
-            x_img_all = torch.cat([x_img, x_img], dim=0)
-            x_tab_all = torch.cat([x_tab, x_tab_neg], dim=0)
-            y_all = torch.cat([y_pos, y_neg], dim=0)
+                # forward
+                z_img = self.image_encoder(x_img_all)
+                z_tab = self.tabular_encoder(x_tab_all)
+                y_pred = self(z_img, z_tab)
 
-            # Forward
-            z_img = image_encoder(x_img_all)
-            z_tab = tabular_encoder(x_tab_all)
-            y_pred = discriminator(z_img, z_tab)
+                loss = F.binary_cross_entropy(y_pred, y_all)
+                total_loss += loss.item()
 
-            # Loss
-            loss = F.binary_cross_entropy(y_pred, y_all)
-            total_loss += loss.item()
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            # Backprop
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                y_true_all.extend(y_all.detach().cpu().numpy())
+                y_pred_all.extend(y_pred.detach().cpu().numpy())
 
-            y_true_all.extend(y_all.detach().cpu().numpy())
-            y_pred_all.extend(y_pred.detach().cpu().numpy())
+            auc = roc_auc_score(y_true_all, y_pred_all)
+            print(f"Epoch {epoch+1}/{epochs}  |  loss={total_loss:.4f}  |  AUC={auc:.4f}")
 
-        auc = roc_auc_score(y_true_all, y_pred_all)
-        print(f"Epoch {epoch+1} - Loss: {total_loss:.4f} - AUC: {auc:.4f}")
+        torch.save(self.state_dict(), save_path)
+        print(f"Full model saved to →  {save_path}")
 
-    # Save models
-    save_path = os.path.join(save_path, f"coherence_discriminator_models_{epochs}epochs.pth")
-    torch.save({
-        'image_encoder': image_encoder.state_dict(),
-        'tabular_encoder': tabular_encoder.state_dict(),
-        'discriminator': discriminator.state_dict()
-    }, save_path)
+    def _load_discriminator_models(self,
+                                   checkpoint_path: str):
+        """
+        Load the full saved state_dict (encoders + classifier).
 
-    print(f"Models saved to {save_path}")
-    return image_encoder, tabular_encoder, discriminator
+        Args:
+            checkpoint_path: path to saved model weights
+        """
+        state = torch.load(checkpoint_path, map_location=self.device)
+        self.load_state_dict(state)
+        self.to(self.device)
+        self.eval()
+        self.image_encoder.eval()
+        self.tabular_encoder.eval()
+        print(f"Full model loaded from ←  {checkpoint_path}")
 
-def load_discriminator_models(checkpoint_path, device='cuda'):
-    """
-    Load the trained discriminator models from a checkpoint.
-    Args:
-        checkpoint_path: path to the checkpoint file
-        device: device to load the models on
-    Returns:
-        image_encoder: ImageEncoder model
-        tabular_encoder: TabularEncoder model
-        discriminator: Discriminator model
-    """
-    image_encoder = ImageEncoder().to(device)
-    tabular_encoder = TabularEncoder().to(device)
-    discriminator = Discriminator().to(device)
+    @torch.no_grad()
+    def evaluate(self,
+                 loader,
+                 checkpoint_path: str | None = None):
+        """
+        Evaluate coherence scores (probabilities ∈ [0,1]) for every
+        (image, tabular) pair in `loader`.
+        If `checkpoint_path` is supplied, the model weights are loaded first.
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    image_encoder.load_state_dict(checkpoint['image_encoder'])
-    tabular_encoder.load_state_dict(checkpoint['tabular_encoder'])
-    discriminator.load_state_dict(checkpoint['discriminator'])
+        Args:
+            loader: DataLoader yielding batches as dicts
+            checkpoint_path: path to saved model weights (optional)
+        Returns:
+            List of coherence scores for each batch in the loader.
+        """
+        if checkpoint_path:
+            self._load_discriminator_models(checkpoint_path)
 
-    image_encoder.eval()
-    tabular_encoder.eval()
-    discriminator.eval()
+        self.eval()
+        self.image_encoder.eval()
+        self.tabular_encoder.eval()
 
-    print(f"Models loaded from {checkpoint_path}")
-    return image_encoder, tabular_encoder, discriminator
+        scores = []
+        for batch in tqdm.tqdm(loader, desc="Evaluating"):
+            x_img = batch['image'].to(self.device)
+            x_tab = batch['tabular'].to(self.device)
 
+            z_img = self.image_encoder(x_img)
+            z_tab = self.tabular_encoder(x_tab)
+            y_pred = self(z_img, z_tab)           # (B,1)
+            scores.extend(y_pred.squeeze().tolist())
 
-def evaluate_synthetic_coherence(image_encoder, tabular_encoder, discriminator, synthetic_loader, device='cuda'):
-    """
-    Evaluate the coherence of synthetic data using the trained discriminator.
-    Args:
-        image_encoder: ImageEncoder model
-        tabular_encoder: TabularEncoder model
-        discriminator: Discriminator model
-        synthetic_loader: DataLoader for synthetic data
-        device: device to run the evaluation on
-    Returns:
-        List of coherence scores for the synthetic data.
-
-    A score close to 0 indicates a mismatch, while a score close to 1 indicates a match.
-    """
-    image_encoder.eval()
-    tabular_encoder.eval()
-    discriminator.eval()
-
-    y_preds = []
-    with torch.no_grad():
-        for batch in tqdm.tqdm(synthetic_loader, desc="Evaluating Synthetic Data"):
-            x_img = batch['image'].to(device)
-            x_tab = batch['tabular'].to(device)
-
-            z_img = image_encoder(x_img)
-            z_tab = tabular_encoder(x_tab)
-            y_pred = discriminator(z_img, z_tab)  # (B, 1)
-
-            y_preds.extend(y_pred.squeeze().tolist())
-
-    return y_preds
+        return scores
 
 def create_shuffled_tabular_loader(original_loader, device='cpu'):
     """
@@ -253,27 +249,23 @@ if __name__ == "__main__":
 
 #################################################################################
 
-    use_pretrained_discriminator = True
-    checkpoint_path_discriminator = 'PRISMS/metrics/coherence/checkpoints/'
+    train_discriminator = True
+    checkpoint_path = 'PRISMS/metrics/coherence/checkpoints/'
+    discriminator_weights = 'coherence_discriminator_models_100epochs.pth'
+    checkpoint_path_discriminator = os.path.join(checkpoint_path, discriminator_weights)
 
     train_loader = load_training_data(cfg)
     synth_loader = load_training_data(cfg)
     shuffled_loader = create_shuffled_tabular_loader(train_loader, device=device)
 
-    if use_pretrained_discriminator:
-        image_encoder, tabular_encoder, discriminator = load_discriminator_models(os.path.join(checkpoint_path_discriminator, 'coherence_discriminator_models_100epochs.pth'), device)
+    discriminator = Discriminator()
+    if train_discriminator:
+        discriminator.fit(train_loader, epochs=100, save_path=checkpoint_path_discriminator)
+        coherence_scores = discriminator.evaluate(synth_loader)
+        coherence_scores_ = discriminator.evaluate(shuffled_loader)
     else:
-        image_encoder, tabular_encoder, discriminator = train_discriminator(train_loader, epochs=100, device=device, save_path=checkpoint_path_discriminator)
-
-    # Evaluate synthetic data
-    coherence_scores = evaluate_synthetic_coherence(
-        image_encoder, tabular_encoder, discriminator,
-        synth_loader, device=device
-    )
-    coherence_scores_ = evaluate_synthetic_coherence(
-        image_encoder, tabular_encoder, discriminator,
-        shuffled_loader, device=device
-    )
+        coherence_scores = discriminator.evaluate(synth_loader, checkpoint_path=checkpoint_path_discriminator)
+        coherence_scores_ = discriminator.evaluate(shuffled_loader, checkpoint_path=checkpoint_path_discriminator)
 
     import numpy as np
     print('Coherence Scores')
