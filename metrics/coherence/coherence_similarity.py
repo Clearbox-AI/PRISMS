@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Tuple
 import sys
 prisms_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.append(prisms_path)
@@ -67,36 +68,76 @@ def info_nce(img_emb, tab_emb, temperature: float = 0.07):
     loss_t2i = F.cross_entropy(logits.T, labels)
     return 0.5 * (loss_i2t + loss_t2i)
 
-def train_contrastive(loader: DataLoader,
-                      epochs: int = 10,
-                      dim: int = 128,
-                      lr: float = 1e-4,
-                      device: str = "cuda"):
+def train_similarity(loader: DataLoader,
+                      epochs: int,
+                      dim: int,
+                      lr: float,
+                      device: str,
+                      save_path: str) -> Tuple[nn.Module, nn.Module]:
+    """
+    Train image and tabular encoders using similarity loss.
 
-    tab_dim = next(iter(loader))["tabular"].shape[1]
+    Args:
+    -----------
+        loader : DataLoader with (image, tabular) pairs
+        epochs : number of training epochs
+        dim : latent vector size
+        lr : learning rate
+        device : device to use for computation
+        save_path : path to save the trained encoders
+    Returns:
+    -----------
+        img_enc, tab_enc : trained encoders
+    """
 
-    img_enc = ImageEncoder(dim).to(device)
-    tab_enc = TabularEncoder(in_features=tab_dim, dim=dim).to(device)
+    tab_dim  = next(iter(loader))["tabular"].shape[1]   # 157 in your case
+    img_enc  = ImageEncoder(dim).to(device)
+    tab_enc  = TabularEncoder(tab_dim, dim).to(device)
+
     opt = torch.optim.AdamW(list(img_enc.parameters()) +
                             list(tab_enc.parameters()), lr=lr)
 
-    for epoch in range(epochs):
+    for ep in range(epochs):
         running = 0.0
-        for batch in tqdm.tqdm(loader, desc=f"Epoch {epoch+1}/{epochs}"):
-            img = batch["image"].to(device)          # (B,1,256,256)
-            tab = batch["tabular"].to(device)        # (B,157)
+        for batch in tqdm.tqdm(loader, desc=f"Epoch {ep+1}/{epochs}"):
+            img = batch["image"].to(device)
+            tab = batch["tabular"].to(device)
 
-            z_img = img_enc(img)
-            z_tab = tab_enc(tab)
-            loss  = info_nce(z_img, z_tab)
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
+            loss = info_nce(img_enc(img), tab_enc(tab))
+            opt.zero_grad(); loss.backward(); opt.step()
             running += loss.item()
 
-        print(f"epoch {epoch+1}: loss {running/len(loader):.4f}")
+        print(f"epoch {ep+1}: loss {running/len(loader):.4f}")
 
+    # Save both encoders in one file
+    torch.save({"img_enc": img_enc.state_dict(),
+                "tab_enc": tab_enc.state_dict()}, save_path)
+    print(f"✓ encoders saved → {os.path.abspath(save_path)}")
+    return img_enc, tab_enc
+
+
+def load_encoders(checkpoint: str, dim: int, device: str):
+    """
+    Load encoders from checkpoint.
+    
+    Args:
+    -----------
+        checkpoint : path to saved model weights
+        dim : latent vector size
+        device : device to use for computation
+    Returns:
+    -----------
+        img_enc, tab_enc : encoders (already trained)
+    """
+    state   = torch.load(checkpoint, map_location=device)
+    img_enc = ImageEncoder(dim).to(device)
+    tab_dim = state["tab_enc"]["net.0.weight"].shape[1]  # recover input size
+    tab_enc = TabularEncoder(tab_dim, dim).to(device)
+
+    img_enc.load_state_dict(state["img_enc"])
+    tab_enc.load_state_dict(state["tab_enc"])
+    img_enc.eval(); tab_enc.eval()
+    print(f"✓ encoders loaded  ← {os.path.abspath(checkpoint)}")
     return img_enc, tab_enc
 
 @torch.no_grad()
@@ -136,23 +177,31 @@ if __name__ == "__main__":
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    train_flag = True
     checkpoint_path = 'PRISMS/metrics/coherence/checkpoints/'
-    contrastive_weights = 'coherence_discriminator_models_100epochs.pth'
-    checkpoint_path_contrastive_weights = os.path.join(checkpoint_path, contrastive_weights)
+    similarity_weights = 'coherence_similarity_models_10epochs.pth'
+    checkpoint_path_similarity_weights = os.path.join(checkpoint_path, similarity_weights)
+
+    train_flag = True
+    dim         = 128
+    epochs      = 10
+    lr          = 1e-4
 
     train_loader = load_training_data(cfg)
     synth_loader = load_training_data(cfg)
     shuffled_loader = create_shuffled_tabular_loader(train_loader, device=device)
 
-    # training on ORIGINAL (coherent) data 
-    img_enc, tab_enc = train_contrastive(train_loader,
-                                        epochs=5, dim=128, device='cuda')
+    if train_flag:
+        img_enc, tab_enc = train_similarity(train_loader,
+                                             epochs=epochs,
+                                             dim=dim,
+                                             lr=lr,
+                                             device=device,
+                                             save_path=checkpoint_path_similarity_weights)
+    else:
+        img_enc, tab_enc = load_encoders(checkpoint_path_similarity_weights, dim, device)
 
-    # similarity on ORIGINAL  
-    real_sim = similarity_scores(img_enc, tab_enc, train_loader)
-    # similarity on SYNTHETIC 
-    synth_sim = similarity_scores(img_enc, tab_enc, shuffled_loader)
-    
-    print(f"mean real similarity: {sum(real_sim)/len(real_sim):.3f}")
+    # example evaluation (real vs synthetic)
+    real_sim  = similarity_scores(img_enc, tab_enc, train_loader,  device)
+    synth_sim = similarity_scores(img_enc, tab_enc, shuffled_loader, device)
+    print(f"mean real   similarity: {sum(real_sim)/len(real_sim):.3f}")
     print(f"mean synthetic similarity: {sum(synth_sim)/len(synth_sim):.3f}")
