@@ -319,7 +319,6 @@ class Metrics:
         y_dataloader = DataLoader(y_dataset, batch_size=batch_size, shuffle=False)
 
         # # Load DenseNet121FID model and extract features
-        # feature_extractor = InceptionFID(device=self.device)
         feature_extractor = DenseNet121FID(device=self.device)
 
         x_feats = self._extract_features(x_dataloader, feature_extractor)
@@ -347,80 +346,6 @@ class Metrics:
             features.append(feats.cpu())  # Detach from GPU
         return torch.cat(features, dim=0).cpu()
 
-    
-class InceptionFID(nn.Module):
-    """
-    Inception feature extractor for FID computation.
-    """
-    def __init__(self, device='cpu'):
-        """
-        Initialize the InceptionFID class.
-        Args:
-            device (str): Device to use for computation ('cpu' or 'cuda').
-        """
-        super().__init__()
-        self.device = device
-        weights = Inception_V3_Weights.DEFAULT
-        inception = inception_v3(weights=weights, aux_logits=True, transform_input=False)
-        inception.eval()
-
-        self.features = nn.Sequential(
-            inception.Conv2d_1a_3x3,
-            inception.Conv2d_2a_3x3,
-            inception.Conv2d_2b_3x3,
-            inception.maxpool1,
-            inception.Conv2d_3b_1x1,
-            inception.Conv2d_4a_3x3,
-            inception.maxpool2,
-            inception.Mixed_5b,
-            inception.Mixed_5c,
-            inception.Mixed_5d,
-            inception.Mixed_6a,
-            inception.Mixed_6b,
-            inception.Mixed_6c,
-            inception.Mixed_6d,
-            inception.Mixed_6e,
-            inception.Mixed_7a,
-            inception.Mixed_7b,
-            inception.Mixed_7c,
-            nn.AdaptiveAvgPool2d((1, 1))
-        ).to(device)
-
-        for param in self.features.parameters():
-            param.requires_grad = False
-
-    def forward(self, x):
-        """
-        Forward pass through the Inception model.
-        Args:
-            x (torch.Tensor): Input tensor.
-        Returns:
-            torch.Tensor: Extracted features.
-        """
-        with torch.no_grad():
-            x = self.features(x)
-            x = torch.flatten(x, 1)
-            return x
-
-
-class InceptionPreprocessedDataset(torch.utils.data.Dataset):
-    """
-    Dataset class for preprocessed images.
-    """
-    def __init__(self, tensor):
-        self.tensor = tensor
-        self.mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        self.std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-
-    def __getitem__(self, idx):
-        img = self.tensor[idx]
-        img = F.interpolate(img.unsqueeze(0), size=(299, 299), mode='bilinear', align_corners=False).squeeze(0)
-        img = (img - self.mean.to(img.device)) / self.std.to(img.device)
-        return img
-
-    def __len__(self):
-        return self.tensor.shape[0]
-        
 class DenseNetPreprocessedDataset(torch.utils.data.Dataset):
     """
     Dataset that resizes images for DenseNet121 without redundant normalization.
@@ -473,7 +398,7 @@ if __name__ == "__main__":
     synth_loader = load_training_data(cfg)
 
     metrics_manager = Metrics(train_loader, synth_loader, val_loader)
-    # tab_metrics = metrics_manager.tabular()
+    tab_metrics = metrics_manager.tabular()
     img_metrics = metrics_manager.images()
-    # metrics_manager.tab_report()
+    metrics_manager.tab_report()
     a = 0

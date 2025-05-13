@@ -196,7 +196,7 @@ class Discriminator(nn.Module):
 
         return scores
 
-def create_shuffled_tabular_loader(original_loader, device='cpu'):
+def create_shuffled_tabular_loader(original_loader):
     """
     Given a DataLoader yielding batches with 'image' and 'tabular',
     returns a new DataLoader with tabular data randomly shuffled.
@@ -208,6 +208,7 @@ def create_shuffled_tabular_loader(original_loader, device='cpu'):
     Returns:
         DataLoader with same images but shuffled tabular entries.
     """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     all_images = []
     all_tabular = []
 
@@ -247,8 +248,6 @@ if __name__ == "__main__":
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-#################################################################################
-
     train_flag = True
     checkpoint_path = 'PRISMS/metrics/coherence/checkpoints/'
     discriminator_weights = 'coherence_discriminator_models_100epochs.pth'
@@ -256,7 +255,7 @@ if __name__ == "__main__":
 
     train_loader = load_training_data(cfg)
     synth_loader = load_training_data(cfg)
-    shuffled_loader = create_shuffled_tabular_loader(train_loader, device=device)
+    shuffled_loader = create_shuffled_tabular_loader(train_loader)
 
     discriminator = Discriminator()
     if train_flag:
