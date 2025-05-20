@@ -14,7 +14,8 @@ from pathlib import Path
 
 from data.nacc_dataset import NaccDataset
 from enums.data import DatasetType, ImageRange
-
+from torch.utils.data import Subset
+import random
 
 
 def load_training_data(cfg: DictConfig) -> DataLoader:
@@ -49,6 +50,12 @@ def load_training_data(cfg: DictConfig) -> DataLoader:
     else:
         # to implement for other datasets
         raise NotImplementedError
+
+    # if "random_subset" in cfg.data and cfg.data.random_subset is not None:
+    #     full_indices = list(range(len(dataset)))
+    #     random.shuffle(full_indices)
+    #     chosen = full_indices[:cfg.data.random_subset]
+    #     dataset = Subset(dataset, chosen)
 
     # Step 3: Build distributed sampler if needed
     world_size, rank = 1, 0

@@ -53,6 +53,10 @@ def ddp_sample(model, *args, **kwargs):
     Calls 'sample' on the underlying model if wrapped in DDP.
     """
     if isinstance(model, DDP):
-        return model.module.sample(*args, **kwargs)
+        return model.module.generate(*args, **kwargs)
     else:
-        return model.sample(*args, **kwargs)
+        return model.generate(*args, **kwargs)
+    # if isinstance(model, DDP):
+    #     return model.module._sample_edm(*args, **kwargs)
+    # else:
+    #     return model._sample_edm(*args, **kwargs)

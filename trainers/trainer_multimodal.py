@@ -1,23 +1,20 @@
-import os
-import torch
-import random
-import pandas as pd
 from torch import optim
-from torchvision.utils import save_image
-from pathlib import Path
 from torch.nn.parallel import DistributedDataParallel as DDP
 from hydra import compose, initialize_config_dir
-import glob
+import os
+import torch
+import torch.nn as nn
+from pathlib import Path
+from datetime import datetime
 
-import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from models.utils.model_loader import load_model
 from data.loader import load_training_data
 from enums.models.model_types import ModelType
 from enums.training_versions import DiTTrainingVersion
-from utils.ddp import is_main_process, ddp_sample, setup_distributed, cleanup_distributed
-from utils.model import save_checkpoint, resume_from_checkpoint, strip_ddp_prefix
+from utils.ddp import is_main_process, setup_distributed, cleanup_distributed
+from utils.model import save_checkpoint, resume_from_checkpoint
 from utils.path_management import setup_storage_directory
 from utils.data import save_images, save_tabulars
 from models.vae.vae import encode_images, decode_latents
@@ -46,19 +43,20 @@ def train_one_epoch(
         latents = encode_images(vae, images, cfg.vae.scaling_factor)
 
         # 3) Forward and loss
-        total_loss, image_loss, tab_loss = model(latents, tab_data)
-        last_total_loss = total_loss.item()
+        loss_total, loss_img, loss_tab = model(latents, tab_data)
+        last_total_loss = loss_total.item()
 
         optimizer.zero_grad(set_to_none=True)
-        total_loss.backward()
+        loss_total.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # prova
+
         optimizer.step()
 
         # 4) Logging (only rank-0 prints)
         if is_main_process() and (global_step % cfg.training.log_interval == 0):
             msg = (f"[Epoch {epoch + 1} | Step {global_step}] "
-                   f"Img Loss: {image_loss.item():.4f}")
-            if tab_loss is not None:
-                msg += f" | Tab Loss: {tab_loss.item():.4f}"
+                   f"Img Loss: {loss_img.item():.4f}")
+            msg += f" | Tab Loss: {loss_tab.item():.4f}"
             msg += f" | Total: {last_total_loss:.4f}"
             print(msg)
 
@@ -66,25 +64,20 @@ def train_one_epoch(
         if is_main_process() and (global_step % cfg.training.sample_interval == 0):
             model.eval()
             with torch.no_grad():
-                # Sample latents (conditional on tab_data)
-                sub_tab = tab_data[:cfg.training.sample_batch_size].to(device)
-                sampled_latents, cond_tab_out = ddp_sample(
-                    model=model,
-                    batch_size=cfg.training.sample_batch_size,
-                    table_data=sub_tab,
-                    cfg=cfg.training.sample_conditioning,
-                    steps=cfg.training.sample_steps,
-                    height=cfg.data.image_size,
-                    width=cfg.data.image_size,
-                    device=device,
-                    save_path=cfg.training.sample_latents_path
+                latents_img_out, latents_tab_out = ddp_sample(
+                    model_ema=model,
+                    batch_size=4,
                 )
-                # Now decode latents -> images
-                decoded_imgs = decode_latents(vae, sampled_latents, cfg.vae.scaling_factor)
-                save_images(base_save_path, decoded_imgs, global_step)
 
-                if cond_tab_out is not None:
-                    save_tabulars(base_save_path, cond_tab_out, global_step)
+                # Now decode latents -> images
+                # 1) Decode image latents -> actual images
+                if latents_img_out is not None:
+                    recon_images = decode_latents(vae, latents_img_out, cfg.vae.scaling_factor)
+                    save_images(base_save_path, recon_images, global_step)
+
+                # 2) Save tabular data if latents_tab_out is relevant
+                if latents_tab_out is not None:
+                    save_tabulars(base_save_path, latents_tab_out, global_step)
 
             model.train()
 
@@ -100,7 +93,7 @@ def train_one_epoch(
                 optimizer=optimizer,
                 epoch=epoch,
                 step=global_step,
-                last_loss=total_loss.item(),
+                last_loss=loss_tab.item(),
                 use_ddp=cfg.distributed.use_ddp
             )
 
@@ -142,7 +135,19 @@ def train_model(cfg: DictConfig) -> None:
 
     # 5) Wrap the diffusion model in DDP (if desired)
     if cfg.distributed.use_ddp:
-        mm_diff_model = DDP(mm_diff_model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+        mm_diff_model = DDP(mm_diff_model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+        monitor_target = mm_diff_model.module
+    else:
+        monitor_target = mm_diff_model
+
+    THRESHOLD = 1e3
+    log_dir = Path(main_save_dir) / "logs"
+    monitor = FlowMonitor(
+        monitor_target,
+        threshold=THRESHOLD,
+        log_dir=log_dir,
+        rank=local_rank
+    )
 
     # 6) Create optimizer
     optimizer = optim.AdamW(mm_diff_model.parameters(), lr=cfg.training.lr)
@@ -160,35 +165,53 @@ def train_model(cfg: DictConfig) -> None:
         )
 
     # 8) Training loop
-    for epoch in range(start_epoch, cfg.training.epochs):
-        # If using a DistributedSampler, set epoch for shuffling
-        if cfg.distributed.use_ddp and hasattr(train_loader.sampler, 'set_epoch'):
-            train_loader.sampler.set_epoch(epoch)
+    try:
+        for epoch in range(start_epoch, cfg.training.epochs):
+            # If using a DistributedSampler, set epoch for shuffling
+            if cfg.distributed.use_ddp and hasattr(train_loader.sampler, 'set_epoch'):
+                train_loader.sampler.set_epoch(epoch)
 
-        global_step, last_loss = train_one_epoch(
-            epoch=epoch, model=mm_diff_model, optimizer=optimizer, train_loader=train_loader,
-            cfg=cfg, vae=vae, global_step=global_step, base_save_path=main_save_dir, device=device,
-        )
+            global_step, last_loss = train_one_epoch(
+                epoch=epoch, model=mm_diff_model, optimizer=optimizer, train_loader=train_loader,
+                cfg=cfg, vae=vae, global_step=global_step, base_save_path=main_save_dir, device=device,
+            )
 
-    # 9) Final checkpoint (only rank-0)
-    if cfg.training.save_model_interval is not None and is_main_process():
-        save_checkpoint(
-            ckpt_dir=main_save_dir,
-            ckpt_name=f"checkpoint_step_{global_step}_final.pt",
-            model=mm_diff_model,
-            optimizer=optimizer,
-            epoch=cfg.training.epochs,
-            step=global_step,
-            last_loss=last_loss,
-            use_ddp=cfg.distributed.use_ddp
-        )
+        # 9) Final checkpoint (only rank-0)
+        if cfg.training.save_model_interval is not None and is_main_process():
+            save_checkpoint(
+                ckpt_dir=main_save_dir,
+                ckpt_name=f"checkpoint_step_{global_step}_final.pt",
+                model=mm_diff_model,
+                optimizer=optimizer,
+                epoch=cfg.training.epochs,
+                step=global_step,
+                last_loss=last_loss,
+                use_ddp=cfg.distributed.use_ddp
+            )
 
-    # 10) Cleanup
-    if cfg.distributed.use_ddp:
-        cleanup_distributed()
+        # 10) Cleanup
+        if cfg.distributed.use_ddp:
+            cleanup_distributed()
 
-    if is_main_process():
-        print("Training complete!")
+        if is_main_process():
+            print("Training complete!")
+    except RuntimeError as e:
+        print(f"Training stopped: {e}")
+    finally:
+        monitor.close()
+
+def ddp_sample(model_ema, *args, **kwargs):
+    """
+    Calls 'sample' on the underlying model if wrapped in DDP.
+    """
+    if isinstance(model_ema, DDP):
+        return model_ema.module.sample(*args, **kwargs)
+    else:
+        return model_ema.sample(*args, **kwargs)
+    # if isinstance(model, DDP):
+    #     return model.module._sample_edm(*args, **kwargs)
+    # else:
+    #     return model._sample_edm(*args, **kwargs)
 
 
 def get_main_save_directory(cfg):
@@ -226,6 +249,72 @@ def get_main_save_directory(cfg):
 
     return main_save_dir
 
+
+class FlowMonitor:
+    def __init__(self, model: nn.Module, threshold: float, log_dir: Path, rank: int = 0):
+        self.threshold = threshold
+        self.monitoring = False
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fname = f"suspicious_rank{rank}.log" if rank else "suspicious.log"
+        self.log_path = log_dir / fname
+        self.log_file = open(self.log_path, "a", buffering=1)
+        self._register_hooks(model)
+
+    def _timestamp(self):
+        return datetime.now().isoformat()
+
+    def _log(self, msg: str):
+        self.log_file.write(f"{self._timestamp()} {msg}\n")
+
+    def _check_and_log(self, name: str, tensor: torch.Tensor, where: str):
+        if not torch.is_tensor(tensor):
+            return
+        t = tensor.detach()
+        # compute stats
+        t_min = t.min().item()
+        t_max = t.max().item()
+        t_mean = t.mean().item()
+        # decide if we should start monitoring
+        if (t_max > self.threshold or t_min < -self.threshold or
+            torch.isnan(t).any() or torch.isinf(t).any() or self.monitoring):
+            if not self.monitoring:
+                self._log(f"▶▶ Threshold exceeded in `{name}` ({where}): "
+                          f"min={t_min:.3e}, max={t_max:.3e}, mean={t_mean:.3e}")
+                self.monitoring = True
+            else:
+                self._log(f"{where} `{name}`: min={t_min:.3e}, max={t_max:.3e}, mean={t_mean:.3e}")
+            # if we see a NaN/Inf, immediately stop
+            if torch.isnan(t).any() or torch.isinf(t).any():
+                self._log(f"‼‼ NaN/Inf detected in `{name}` during {where}. Stopping training.")
+                self.log_file.close()
+                raise RuntimeError(f"NaN/Inf in `{name}` during {where}")
+
+    def _make_fwd_hook(self, name):
+        def hook(module, inp, out):
+            # only check the outputs; you could also check inputs if you like
+            if isinstance(out, torch.Tensor):
+                self._check_and_log(name, out, "forward")
+            elif isinstance(out, (tuple, list)):
+                for i, o in enumerate(out):
+                    self._check_and_log(f"{name}[{i}]", o, "forward")
+        return hook
+
+    def _make_grad_hook(self, name):
+        def hook(grad):
+            self._check_and_log(name, grad, "backward_grad")
+            return grad
+        return hook
+
+    def _register_hooks(self, model):
+        # forward hooks
+        for name, module in model.named_modules():
+            module.register_forward_hook(self._make_fwd_hook(name))
+        # gradient hooks
+        for name, param in model.named_parameters():
+            param.register_hook(self._make_grad_hook(name))
+
+    def close(self):
+        self.log_file.close()
 
 if __name__ == "__main__":
 

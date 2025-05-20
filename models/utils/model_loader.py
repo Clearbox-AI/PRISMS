@@ -13,14 +13,21 @@ from enums.training_versions import DiTTrainingVersion
 # from models.dit.dit_multimodal import load_dit
 # from models.diffusion.diffusion_multimodal_mod3 import load_diffusion
 # from models.dit.dit_multimodal_mod3 import load_dit
-from models.diffusion.diffusion_multimodal_new_copy import load_diffusion
-from models.dit.dit_multimodal_mod3 import load_dit
+# from models.diffusion.diffusion_multimodal_new_copy import load_diffusion
+# from models.dit.dit_multimodal_mod3 import load_dit
+# from models.diffusion.diffusion_multimodal_add11 import load_diffusion
+# from models.dit.dit_multimodal_add11 import load_dit
+# from models.diffusion.diffusion_multimodal_add12 import load_diffusion
+# from models.dit.dit_multimodal_add12 import load_dit
+from models.diffusion.diffusion_multimodal_add17 import load_diffusion
+from models.dit.dit_multimodal_add17 import load_dit
 from models.vae.vae import load_vae
 
 
 def load_model(
     model_type: ModelType,
     model_variant: Optional[DiTTrainingVersion] = None,
+    tmp_param: Any = None,
     **overrides: Any
 ) -> nn.Module:
     """
@@ -80,8 +87,7 @@ def load_model(
         if model_type == ModelType.DIFFUSION: #TODO: dovrei passare training, non solo diff. Forse modificare in overrides
             with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
                 cfg = compose(config_name="diffusion")
-
-            diffusion_model = load_diffusion(cfg, dit_model, **overrides)
+            diffusion_model = load_diffusion(cfg=cfg, dit_model=dit_model, tmp_param=tmp_param, **overrides)
             return diffusion_model
 
         return dit_model

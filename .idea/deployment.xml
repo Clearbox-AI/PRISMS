@@ -3,10 +3,31 @@
   <component name="PublishConfigData" autoUpload="Always" serverName="giovanni@35.242.219.34:22 key (9)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" showNewOnTargetInSync="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
+      <paths name="giovanni@34.1.144.66:22 agent">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
       <paths name="giovanni@35.242.219.34:22 key">
         <serverdata>
           <mappings>
             <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.242.219.34:22 key (10)">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.242.219.34:22 key (11)">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

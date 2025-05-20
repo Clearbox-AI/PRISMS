@@ -17,9 +17,11 @@ from enums.data import ImageRange
 
 class NaccDataset(BaseNaccDataset):
     """
-    Specialized dataset for NACC data.
-    Loads .npy image slices and .json tabular data.
-    Reads precomputed normalization stats from a provided stats file.
+    Specialized dataset for NACC data under the new naming convention:
+      Each patient folder contains exactly 3 files:
+        - 'image.npy' for the image slice
+        - 'tabular.json' for tabular patient data
+        - 'metadata.json' for additional metadata
     """
 
     def __init__(self,
@@ -51,6 +53,8 @@ class NaccDataset(BaseNaccDataset):
         self.image_std = 1.0
         self.tabular_scaler = StandardScaler()
 
+        # Decide where to save newly computed stats (if we need to compute them)
+
         # Load the precomputed stats from JSON (if provided)
         if stats_file is not None and os.path.isfile(stats_file):
             self._load_stats_from_file(stats_file)
@@ -69,10 +73,13 @@ class NaccDataset(BaseNaccDataset):
             self.image_transform = None
 
     def __getitem__(self, idx):
+        # Patient directory (one subfolder per patient)
         patient_dir = self._get_patient_dir(idx)
 
-        # 1) Load image
-        image_path = self._get_first_file(patient_dir, "*.npy")
+        # 1) Load image from "image.npy"
+        image_path = os.path.join(patient_dir, "image.npy")
+        if not os.path.isfile(image_path):
+            raise FileNotFoundError(f"Expected image.npy not found in {patient_dir}")
         image = np.load(image_path).astype(np.float32)  # shape [H, W]
 
         # 2) Domain-specific normalization (mock)
@@ -110,10 +117,14 @@ class NaccDataset(BaseNaccDataset):
                 self._debug_show_image(image_tensor)
             type(self)._debug_shown_global = True
 
-        # 8) Load tabular
-        json_path = self._get_first_file(patient_dir, "*.json")
-        with open(json_path, 'r') as f:
+        # 8) Load tabular data from "tabular.json"
+        tabular_path = os.path.join(patient_dir, "tabular.json")
+        if not os.path.isfile(tabular_path):
+            raise FileNotFoundError(f"Expected tabular.json not found in {patient_dir}")
+
+        with open(tabular_path, 'r') as f:
             jdata = json.load(f)
+
         tab = jdata.get("patient_id", list(jdata.values())[0])
         tab = np.array(tab, dtype=np.float32)
         tab = np.where(tab > 9999, -1, tab)  # sentinel replacement
@@ -124,15 +135,20 @@ class NaccDataset(BaseNaccDataset):
 
         tab_tensor = torch.from_numpy(tab).squeeze(0)
 
+        # 9) (Optional) load metadata from "metadata.json"
+        metadata_path = os.path.join(patient_dir, "metadata.json")
+        metadata = {}
+        if os.path.isfile(metadata_path):
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+
         return {
             "image": image_tensor,
             "tabular": tab_tensor,
-            "dir": patient_dir
+            # "metadata": metadata,
+            "dir": patient_dir,
         }
 
-    # -------------------------------------------------------------
-    # Helper methods
-    # -------------------------------------------------------------
     def _load_stats_from_file(self, stats_file: str):
         """
         Load the precomputed stats from a JSON file.
@@ -159,33 +175,35 @@ class NaccDataset(BaseNaccDataset):
             self.tabular_scaler.mean_ = np.array(mean_)
             self.tabular_scaler.scale_ = np.array(scale_)
             self.tabular_scaler.n_features_in_ = len(mean_)
-        else:
-            pass
 
     def _domain_specific_normalization(self, image: np.ndarray) -> np.ndarray:
-        # Example placeholder
         if self.domain == "ct":
-            # image = np.clip(image, 0, 2048) / 2048.0
+            # For example: image = np.clip(image, 0, 2048) / 2048.0
             pass
         elif self.domain == "mri":
-            # e.g., _clip_outliers(image)
+            # For example: _clip_outliers(image)
             pass
         return image
 
     def _resize_or_pad(self, img: np.ndarray, new_h: int, new_w: int) -> np.ndarray:
         H, W = img.shape[:2]
         if H > new_h or W > new_w:
+            # If bigger, resize down
             img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
         else:
+            # Otherwise pad, then ensure final size
             delta_h = new_h - H
             delta_w = new_w - W
             pad_top = delta_h // 2
             pad_bottom = delta_h - pad_top
             pad_left = delta_w // 2
             pad_right = delta_w - pad_left
-            img = np.pad(img,
-                         ((pad_top, pad_bottom), (pad_left, pad_right)),
-                         mode='constant', constant_values=0)
+            img = np.pad(
+                img,
+                ((pad_top, pad_bottom), (pad_left, pad_right)),
+                mode='constant',
+                constant_values=0
+            )
             if img.shape[0] != new_h or img.shape[1] != new_w:
                 img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
         return img
@@ -198,14 +216,14 @@ class NaccDataset(BaseNaccDataset):
             return img
         elif C > target_channels:
             return img[:target_channels, :, :]
-
-        # C < target_channels
-        repeats = target_channels // C
-        remainder = target_channels % C
-        out = np.concatenate([img] * repeats, axis=0)
-        if remainder:
-            out = np.concatenate([out, img[:remainder, :, :]], axis=0)
-        return out
+        else:
+            # Expand channels by repeating
+            repeats = target_channels // C
+            remainder = target_channels % C
+            out = np.concatenate([img] * repeats, axis=0)
+            if remainder:
+                out = np.concatenate([out, img[:remainder, :, :]], axis=0)
+            return out
 
     def _map_final_range(self, image: np.ndarray, frange: ImageRange) -> np.ndarray:
         if frange == ImageRange.plus0to1:

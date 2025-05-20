@@ -1,12 +1,54 @@
-diffusion:
+#diffusion:
+##  sigma_min: 0.002
+##  sigma_max: 20
+##  p_mean: -0.6
+##  p_std: 1.2
+##  sigma_data: 0.9
+##  num_steps: 18
+##  train_mask_ratio: 0.0
+##  latent_reg_weight: 0.0
+##  image_in_channels: 32
+#  train_mask_ratio_img: 0.0
+#  train_mask_ratio_tab: 0.0
+
+
+
+
+#diffusion:
 #  sigma_min: 0.002
-#  sigma_max: 20
+#  sigma_max: 80.0
+#  sigma_data: 0.9
 #  p_mean: -0.6
 #  p_std: 1.2
-#  sigma_data: 0.9
-#  num_steps: 18
+#  num_steps: int = 18
+#  rho: 7.0
+#  S_churn: 0.0
+#  S_min: 0.0
+#  S_max: float('inf')
+#  S_noise: 1.0
+
+#diffusion:
+#  image_size: 32
+#  tab_size: 174
+
+##add6
+#diffusion:
+#  dtype: 'bfloat16'
+
+#add7
+#diffusion:
 #  train_mask_ratio: 0.0
 #  latent_reg_weight: 0.0
-#  image_in_channels: 32
-  train_mask_ratio_img: 0.0
-  train_mask_ratio_tab: 0.0
+#  diffuse_tables: True
+
+#add12
+#diffusion:
+#  num_train_timesteps: 1000
+
+# add13
+#diffusion:
+#  warmup_steps: 2000
+
+# add14
+diffusion:
+  num_tab_features: 157
