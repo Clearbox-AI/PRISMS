@@ -119,19 +119,30 @@ def train_model(cfg: DictConfig) -> None:
     # 2) Load training data
     train_loader = load_training_data(cfg)
 
+    # # 3) Load or create VAE
+    # device = torch.device(f"cuda:{local_rank}") if cfg.training.device == "cuda" else torch.device("cpu")
+    # vae = load_model(model_type=ModelType.VAE, **cfg.vae).to(device)
+    # vae.requires_grad_(False)
+    # vae.eval()  # Typically we keep the VAE frozen
+    #
+    # # 4) Build your diffusion model
+    # mm_diff_model = load_model(
+    #     model_type=ModelType.DIFFUSION,
+    #     model_variant=DiTTrainingVersion.base_dit_training,
+    #     **cfg.diffusion
+    # )
+    # mm_diff_model.to(device)
+
     # 3) Load or create VAE
     device = torch.device(f"cuda:{local_rank}") if cfg.training.device == "cuda" else torch.device("cpu")
-    vae = load_model(model_type=ModelType.VAE, **cfg.vae).to(device)
-    vae.requires_grad_(False)
-    vae.eval()  # Typically we keep the VAE frozen
+    vae = load_model(ModelType.VAE, cfg=cfg).to(device)
+    vae.requires_grad_(False).eval()  # keep VAE frozen
 
-    # 4) Build your diffusion model
+    # 4) Build the multi-modal diffusion model
     mm_diff_model = load_model(
         model_type=ModelType.DIFFUSION,
-        model_variant=DiTTrainingVersion.base_dit_training,
-        **cfg.diffusion
-    )
-    mm_diff_model.to(device)
+        cfg=cfg,
+    ).to(device)
 
     # 5) Wrap the diffusion model in DDP (if desired)
     if cfg.distributed.use_ddp:
@@ -200,18 +211,10 @@ def train_model(cfg: DictConfig) -> None:
     finally:
         monitor.close()
 
-def ddp_sample(model_ema, *args, **kwargs):
-    """
-    Calls 'sample' on the underlying model if wrapped in DDP.
-    """
-    if isinstance(model_ema, DDP):
-        return model_ema.module.sample(*args, **kwargs)
-    else:
-        return model_ema.sample(*args, **kwargs)
-    # if isinstance(model, DDP):
-    #     return model.module._sample_edm(*args, **kwargs)
-    # else:
-    #     return model._sample_edm(*args, **kwargs)
+def ddp_sample(model, *args, **kwargs):
+    if isinstance(model, DDP):
+        return model.module.sample(*args, **kwargs)
+    return model.sample(*args, **kwargs)
 
 
 def get_main_save_directory(cfg):

@@ -23,28 +23,49 @@ def set_project_root():
         os.environ["PROJECT_ROOT"] = PROJECT_ROOT  # Ensure Hydra sees this variable
 
 
-def apply_overrides(cfg: DictConfig, overrides: Dict[str, Any]) -> DictConfig:
+# def apply_overrides(cfg: DictConfig, overrides: Dict[str, Any]) -> DictConfig:
+#     """
+#     Apply keyword argument overrides to the first matching top-level section in the Hydra config.
+#
+#     For example, if cfg has a section 'vae' or 'dit', and you pass an override with a key
+#     'model_name', it will be applied to 'cfg.vae.model_name' or 'cfg.dit.model_name' if found.
+#
+#     Args:
+#         cfg (DictConfig): The original Hydra configuration object.
+#         overrides (Dict[str, Any]): A dictionary of overrides, where each key-value pair should
+#             match an existing field in the top-level sections of the config.
+#
+#     Returns:
+#         DictConfig: The updated configuration after applying overrides.
+#
+#     Raises:
+#         KeyError: If an override key does not exist in any top-level section.
+#     """
+#     for key, value in overrides.items():
+#         for parent_key, section in cfg.items():
+#             # We only apply overrides to top-level DictConfig sections
+#             if isinstance(section, DictConfig) and key in section:
+#                 section[key] = value
+#                 break
+#     return cfg
+
+from omegaconf import DictConfig, OmegaConf
+from copy import deepcopy
+
+
+def _merge_cfg(base: DictConfig, overrides: dict) -> DictConfig:
     """
-    Apply keyword argument overrides to the first matching top-level section in the Hydra config.
+    Return a **new** DictConfig obtained by applying the key/value pairs
+    in *overrides* on top of *base*.
 
-    For example, if cfg has a section 'vae' or 'dit', and you pass an override with a key
-    'model_name', it will be applied to 'cfg.vae.model_name' or 'cfg.dit.model_name' if found.
-
-    Args:
-        cfg (DictConfig): The original Hydra configuration object.
-        overrides (Dict[str, Any]): A dictionary of overrides, where each key-value pair should
-            match an existing field in the top-level sections of the config.
-
-    Returns:
-        DictConfig: The updated configuration after applying overrides.
-
-    Raises:
-        KeyError: If an override key does not exist in any top-level section.
+    *Overrides* may contain **dot-paths** to reach nested fields, e.g.
+    `overrides={"encoder.num_layers": 8}`.
     """
-    for key, value in overrides.items():
-        for parent_key, section in cfg.items():
-            # We only apply overrides to top-level DictConfig sections
-            if isinstance(section, DictConfig) and key in section:
-                section[key] = value
-                break
-    return cfg
+    if not overrides:
+        return deepcopy(base)
+
+    # Convert ``{"a.b": 1, "c":2}`` → OmegaConf.dotlist
+    dotlist = [f"{k}={v}" for k, v in overrides.items()]
+    user_cfg = OmegaConf.from_dotlist(dotlist)
+    merged = OmegaConf.merge(base, user_cfg)
+    return merged

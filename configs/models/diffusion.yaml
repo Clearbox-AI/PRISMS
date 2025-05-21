@@ -49,6 +49,25 @@
 #diffusion:
 #  warmup_steps: 2000
 
-# add14
+# add16
+#diffusion:
+#  num_tab_features: 157
+
+
 diffusion:
+  # basic geometry
   num_tab_features: 157
+
+  # EDM schedule
+  sigma_min: 2e-3
+  sigma_max: 80.0
+  num_steps: 18
+  rho: 7
+  P_mean: -0.6
+  P_std: 1.2
+
+  # Churn (usually switched off)
+  S_churn: 0.0
+  S_min: 0.0
+  S_max: inf
+  S_noise: 1.0

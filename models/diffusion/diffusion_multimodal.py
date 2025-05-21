@@ -1,94 +1,6 @@
 from typing import Any
 from omegaconf import DictConfig
-import torch
-import torch.nn as nn
-
-
-################################################################################
-#                                 EMA helper                                   #
-################################################################################
-
-class EMA:
-    """Exponential moving average of model parameters for more stable sampling."""
-
-    def __init__(
-        self,
-        dit: nn.Module,
-        decay: float = 0.9999,
-        update_after_step: int = 100,
-        update_every: int = 10,
-    ) -> None:
-        self.dit = dit
-        self.decay = decay
-        self.update_after_step = update_after_step
-        self.update_every = update_every
-
-        # clone parameters
-        self.shadow_params = [p.clone().detach() for p in dit.parameters() if p.requires_grad]
-        self.collected_params: Optional[list[torch.Tensor]] = None
-        self.num_updates = 0
-
-    @torch.no_grad()
-    def update(self, dit: nn.Module) -> None:
-        if self.num_updates < self.update_after_step:
-            self.num_updates += 1
-            return
-
-        if (self.num_updates - self.update_after_step) % self.update_every != 0:
-            self.num_updates += 1
-            return
-
-        for s, p in zip(self.shadow_params, dit.parameters(), strict=True):
-            if not p.requires_grad:
-                continue
-            s.data.lerp_(p.data, 1.0 - self.decay)
-        self.num_updates += 1
-
-    def as_model(self) -> nn.Module:
-        """
-        Returns a detached, eval‑mode clone that carries the EMA parameters.
-        The original network (self.dit) is never modified.
-        """
-        import copy
-        ema_clone = copy.deepcopy(self.dit)  # ← keeps architecture only
-        for s, p in zip(self.shadow_params, ema_clone.parameters(), strict=True):
-            if p.requires_grad:
-                p.data.copy_(s.data)
-        ema_clone.eval()
-        for p in ema_clone.parameters():
-            p.requires_grad_(False)
-        return ema_clone
-
-    def copy_to(self, dit: nn.Module) -> None:
-        """Load EMA parameters into `model` (in‑place)."""
-        for s, p in zip(self.shadow_params, dit.parameters(), strict=True):
-            if not p.requires_grad:
-                continue
-            p.data.copy_(s.data)
-
-    def ema_model_inference(self) -> nn.Module:
-        """
-        Returns an *evaluation‑only* clone of ``self.dit`` that carries the
-        shadow (EMA) parameters.  The original model is left untouched, so
-        training can continue straight after sampling.
-        """
-
-        import copy
-        ema_dit = copy.deepcopy(self.dit)
-        for s, p in zip(self.shadow_params, ema_dit.parameters(), strict=True):
-            if not p.requires_grad:
-                continue
-            p.data.copy_(s.data)
-        ema_dit.eval()
-        for p in ema_dit.parameters():
-            p.requires_grad_(False)
-        return ema_dit
-
-################################################################################
-#                           Multi‑modal Diffusion                              #
-################################################################################
-
-# multimodal_diffusion.py
+from omegaconf import OmegaConf
 import copy
 import numpy as np
 import torch
@@ -103,65 +15,43 @@ def _make_t(batch, sigma_scalar):
     """return (B,) float32 tensor with log(σ)/4 repeated B times"""
     return (sigma_scalar.log() / 4).float().repeat(batch)
 
-# -------------------------------------------------------------------------
-# EDM hyper‑parameter container
-# -------------------------------------------------------------------------
-def edm_defaults(p_mean: float = -0.6, p_std: float = 1.2) -> EasyDict:
-    return EasyDict(
-        sigma_min = 2e-3,
-        sigma_max = 80.,
-        P_mean    = p_mean,
-        P_std     = p_std,
-        sigma_data= 0.9,
-        num_steps = 18,
-        rho       = 7,
-        S_churn   = 0.,
-        S_min     = 0.,
-        S_max     = float("inf"),
-        S_noise   = 1.,
-    )
-
-
-# -------------------------------------------------------------------------
-# Main model
-# -------------------------------------------------------------------------
 class MultiModalDiffusion(nn.Module):
-    """
-    DiT‑based EDM that *jointly* diffuses an image latent (B,4,32,32)
-    and a tabular vector (B,F).
-
-    The wrapped `dit_model` **must** expose
-        forward(x_img, x_tab, c_noise, mask_ratio=0., cfg=1.0)
-    and return a dict with keys 'image_sample', 'tab_sample', plus
-    optional 'mask' for MAE‑style training.
-    """
-
-    # ---------------------------------------------------------------------
-    # Construction
-    # ---------------------------------------------------------------------
     def __init__(
         self,
         dit: nn.Module,
-        num_tab_features: int = 157,
+        num_tab_features: int,
+        sigma_min: float,
+        sigma_max: float,
+        num_steps: int,
+        rho: int,
+        P_mean: float,
+        P_std: float,
+        S_churn: float,
+        S_min: float,
+        S_max: float,
+        S_noise: float,
         *,
-        edm_cfg: Optional[dict] = None,
         dtype: str = "bfloat16",
     ):
-        """
-        Parameters
-        ----------
-        dit        : multimodal DiT ‑‑ the *only* trainable component.
-        num_tab_features : dimensionality of tabular vector.
-        edm_cfg          : override EDM defaults (optional).
-        dtype            : compute dtype for DiT ('bfloat16' | 'fp16' | 'fp32').
-        """
         super().__init__()
         self.dit = dit
         self.num_tab_features = num_tab_features
         self.dtype = dtype
-        self.edm = edm_defaults() if edm_cfg is None else EasyDict(edm_cfg)
 
-        # convenience helpers
+        self.edm = EasyDict(
+            sigma_min = sigma_min,
+            sigma_max = sigma_max,
+            num_steps = num_steps,
+            rho       = rho,
+            P_mean    = P_mean,
+            P_std     = P_std,
+            sigma_data= 0.9,
+            S_churn   = S_churn,
+            S_min     = S_min,
+            S_max     = S_max,
+            S_noise   = S_noise,
+        )
+
         self.randn_like = torch.randn_like
 
     # ---------------------------------------------------------------------
@@ -181,7 +71,7 @@ class MultiModalDiffusion(nn.Module):
         device = x_img.device
         B = x_img.size(0)
 
-        # 1) sample a *shared* σ  ~ log 𝒩(P_mean,P_std)
+        # 1) sample a *shared* σ  ~ logN(P_mean,P_std)
         sigma = ((torch.randn(B, 1, device=device) * self.edm.P_std + self.edm.P_mean)
                  .exp())                          # (B,1)
         σ_img = sigma.view(B, 1, 1, 1)
@@ -330,20 +220,32 @@ class MultiModalDiffusion(nn.Module):
 
 
 
-def load_diffusion(cfg: DictConfig, dit_model: nn.Module, tmp_param: Any = None, **overrides: Any) -> nn.Module:
-    """
-    Load a MultiModalDiffusion model from config, injecting a pre-loaded DiT.
-    """
-    from utils.configurations import apply_overrides
-    cfg = apply_overrides(cfg, overrides)
-    print("[INFO] Loading Diffusion model with config:", cfg)
+# def load_diffusion(cfg: DictConfig, dit_model: nn.Module, tmp_param: Any = None, **overrides: Any) -> nn.Module:
+#     """
+#     Load a MultiModalDiffusion model from config, injecting a pre-loaded DiT.
+#     """
+#     from utils.configurations import apply_overrides
+#     cfg = apply_overrides(cfg, overrides)
+#     print("[INFO] Loading Diffusion model with config:", cfg)
+#
+#     if "diffusion" in cfg:
+#         diffusion_model = MultiModalDiffusion(dit=dit_model, **cfg.diffusion)
+#     else:
+#         diffusion_model = MultiModalDiffusion(dit=dit_model, **cfg)
+#
+#     print("[INFO] Loaded Diffusion Model")
+#     return diffusion_model
 
-    if "diffusion" in cfg:
-        diffusion_model = MultiModalDiffusion(dit=dit_model, **cfg.diffusion)
-    else:
-        diffusion_model = MultiModalDiffusion(dit=dit_model, **cfg)
+from utils.configurations import _merge_cfg
+def load_diffusion(cfg: DictConfig, dit_model, **overrides):
+    """
+    Instantiate ``MultiModalDiffusion`` with an already-built *dit_model*.
 
-    print("[INFO] Loaded Diffusion Model")
+    Extra keyword args override (or add) fields in *cfg* exactly like the other
+    loaders.
+    """
+    final_cfg = _merge_cfg(cfg, overrides)
+    diffusion_model = MultiModalDiffusion(dit=dit_model, **final_cfg)
     return diffusion_model
 
 

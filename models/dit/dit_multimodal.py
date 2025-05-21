@@ -8,7 +8,7 @@ from itertools import repeat
 from typing import Optional, Tuple, Dict, Union, List, Any
 
 from omegaconf import DictConfig
-from utils.configurations import apply_overrides
+# from utils.configurations import apply_overrides
 
 
 def ntuple(n: int):
@@ -1173,27 +1173,39 @@ class MultiModalDiT(nn.Module):
         return np.concatenate([emb_h, emb_w], axis=1)
 
 
+# def load_dit(cfg: DictConfig, **overrides: Any) -> nn.Module:
+#     """
+#     Load a MultiModalDiT model based on the provided configuration.
+#
+#     Args:
+#         cfg (DictConfig): The Hydra configuration object for the DiT model.
+#         **overrides (Any): Arbitrary keyword arguments used to override the default configuration.
+#
+#     Returns:
+#         nn.Module: The loaded MultiModalDiT model.
+#     """
+#     # Apply any overrides to the config before loading
+#     cfg = apply_overrides(cfg, overrides)
+#
+#     print("[INFO] Loading MultiModalDiT model with config:", cfg)
+#
+#     # Instantiate the MultiModalDiT model
+#     if "dit" in cfg:
+#         model = MultiModalDiT(**cfg.dit)
+#     else:
+#         model = MultiModalDiT(**cfg)
+#     print("[INFO] Loaded DiT")
+#     return model
+
+from utils.configurations import _merge_cfg
 def load_dit(cfg: DictConfig, **overrides: Any) -> nn.Module:
     """
-    Load a MultiModalDiT model based on the provided configuration.
-
-    Args:
-        cfg (DictConfig): The Hydra configuration object for the DiT model.
-        **overrides (Any): Arbitrary keyword arguments used to override the default configuration.
-
-    Returns:
-        nn.Module: The loaded MultiModalDiT model.
+    Instantiate the Multi-Modal DiT.  Works exactly like ``load_vae`` above.
     """
-    # Apply any overrides to the config before loading
-    cfg = apply_overrides(cfg, overrides)
 
-    print("[INFO] Loading MultiModalDiT model with config:", cfg)
-
-    # Instantiate the MultiModalDiT model
-    if "dit" in cfg:
-        model = MultiModalDiT(**cfg.dit)
-    else:
-        model = MultiModalDiT(**cfg)
+    final_cfg = _merge_cfg(cfg, overrides)
+    print("[INFO] Loading MultiModalDiT model with config:", final_cfg)
+    model = MultiModalDiT(**final_cfg)
     print("[INFO] Loaded DiT")
     return model
 

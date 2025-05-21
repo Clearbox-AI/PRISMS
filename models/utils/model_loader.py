@@ -4,97 +4,125 @@ from hydra.core.global_hydra import GlobalHydra
 import torch.nn as nn
 
 from omegaconf import OmegaConf
+from omegaconf import DictConfig
 from typing import Any, Optional
 from pathlib import Path
 
 from enums.models.model_types import ModelType
 from enums.training_versions import DiTTrainingVersion
-# from models.diffusion.diffusion_multimodal import load_diffusion
-# from models.dit.dit_multimodal import load_dit
-# from models.diffusion.diffusion_multimodal_mod3 import load_diffusion
-# from models.dit.dit_multimodal_mod3 import load_dit
-# from models.diffusion.diffusion_multimodal_new_copy import load_diffusion
-# from models.dit.dit_multimodal_mod3 import load_dit
-# from models.diffusion.diffusion_multimodal_add11 import load_diffusion
-# from models.dit.dit_multimodal_add11 import load_dit
-# from models.diffusion.diffusion_multimodal_add12 import load_diffusion
-# from models.dit.dit_multimodal_add12 import load_dit
-from models.diffusion.diffusion_multimodal_add17 import load_diffusion
-from models.dit.dit_multimodal_add17 import load_dit
+from models.diffusion.diffusion_multimodal import load_diffusion
+from models.dit.dit_multimodal import load_dit
 from models.vae.vae import load_vae
 
 
-def load_model(
-    model_type: ModelType,
-    model_variant: Optional[DiTTrainingVersion] = None,
-    tmp_param: Any = None,
-    **overrides: Any
-) -> nn.Module:
+# def load_model(
+#     model_type: ModelType,
+#     model_variant: Optional[DiTTrainingVersion] = None,
+#     tmp_param: Any = None,
+#     **overrides: Any
+# ) -> nn.Module:
+#     """
+#     Load a specific model type (VAE, DiT, or Diffusion) using Hydra-based configuration management.
+#
+#     This function initializes Hydra with a config directory derived from the 'PROJECT_ROOT'
+#     environment variable. It then composes the config for either a 'vae', 'dit', or 'base_dit_training'
+#     model, loads it, and returns the instantiated model.
+#
+#     Usage:
+#         - If model_type == ModelType.VAE:
+#             Composes and loads a VAE (AutoencoderKL).
+#         - If model_type == ModelType.DIT:
+#             Composes and loads a MultiModalDiT model.
+#         - If model_type == ModelType.DIFFUSION:
+#             First loads a DiT model (since the Diffusion model depends on DiT),
+#             then composes and loads a MultiModalDiffusion model using the same config.
+#
+#     Args:
+#         model_type (ModelType): An enum value indicating which model to load (VAE, DIT, or DIFFUSION).
+#         model_variant (Optional[DiTTrainingVersion]): An enum value indicating which variant of the DiT
+#             training config to load if relevant. For example, `DiTTrainingVersion.base_dit_training`.
+#         **overrides (Any): Arbitrary keyword arguments to override parts of the configuration.
+#
+#     Returns:
+#         nn.Module: The instantiated PyTorch model corresponding to the requested model type.
+#
+#     Raises:
+#         ValueError: If the provided model_type is not supported.
+#     """
+#
+#     from utils.configurations import set_project_root
+#     set_project_root()
+#
+#     # Clear any existing Hydra initialization to avoid conflicts
+#     if GlobalHydra.instance().is_initialized():
+#         GlobalHydra.instance().clear()
+#
+#     if model_type == ModelType.VAE:
+#         # Load VAE config and model
+#         with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
+#             cfg = compose(config_name="vae")
+#             OmegaConf.set_struct(cfg, False)
+#         return load_vae(cfg, **overrides)
+#
+#     elif model_type == ModelType.DIT or model_type == ModelType.DIFFUSION:
+#         # Load DiT config from either a 'base_dit_training' config or a standard 'dit' config
+#         if model_variant == DiTTrainingVersion.base_dit_training:
+#             with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "trainers"))):
+#                 cfg = compose(config_name="base_dit_training")
+#         else:
+#             with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
+#                 cfg = compose(config_name="dit")
+#
+#         dit_model = load_dit(cfg, **overrides)
+#
+#         if model_type == ModelType.DIFFUSION: #TODO: dovrei passare training, non solo diff. Forse modificare in overrides
+#             with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
+#                 cfg = compose(config_name="diffusion")
+#             diffusion_model = load_diffusion(cfg=cfg, dit_model=dit_model, tmp_param=tmp_param, **overrides)
+#             return diffusion_model
+#
+#         return dit_model
+#
+#     else:
+#         raise ValueError(f"Unsupported model type: {model_type}")
+
+def load_model(model_type: ModelType, cfg: DictConfig, **overrides: Any,) -> nn.Module:
     """
-    Load a specific model type (VAE, DiT, or Diffusion) using Hydra-based configuration management.
+    Unified entry-point to build VAE, DiT or Diffusion.
 
-    This function initializes Hydra with a config directory derived from the 'PROJECT_ROOT'
-    environment variable. It then composes the config for either a 'vae', 'dit', or 'base_dit_training'
-    model, loads it, and returns the instantiated model.
+    Parameters
+    ----------
+    model_type : ModelType
+        Which model to create.
+    cfg : DictConfig
+        The **full** Hydra config tree (already composed in the trainer).
+    model_variant : Optional[DiTTrainingVersion]
+        Kept for backward compatibility; currently only tags the "base" DiT.
+    **overrides : Any
+        Arbitrary key/value pairs — including dotted keys — that override
+        or extend the model’s own config subsection at runtime.
 
-    Usage:
-        - If model_type == ModelType.VAE:
-            Composes and loads a VAE (AutoencoderKL).
-        - If model_type == ModelType.DIT:
-            Composes and loads a MultiModalDiT model.
-        - If model_type == ModelType.DIFFUSION:
-            First loads a DiT model (since the Diffusion model depends on DiT),
-            then composes and loads a MultiModalDiffusion model using the same config.
-
-    Args:
-        model_type (ModelType): An enum value indicating which model to load (VAE, DIT, or DIFFUSION).
-        model_variant (Optional[DiTTrainingVersion]): An enum value indicating which variant of the DiT
-            training config to load if relevant. For example, `DiTTrainingVersion.base_dit_training`.
-        **overrides (Any): Arbitrary keyword arguments to override parts of the configuration.
-
-    Returns:
-        nn.Module: The instantiated PyTorch model corresponding to the requested model type.
-
-    Raises:
-        ValueError: If the provided model_type is not supported.
+    Notes
+    -----
+    * The same *overrides* dict is forwarded to the concrete loader.
+      Irrelevant keys are silently ignored by that loader’s `_merge_cfg`.
+    * Call-sites can therefore do either
+        dit = load_model(ModelType.DIT, cfg)
+      *or*
+        diff = load_model(ModelType.DIFFUSION, cfg, num_tab_features=512, sigma_max=120.0)
     """
 
-    from utils.configurations import set_project_root
-    set_project_root()
+    if model_type is ModelType.VAE:
+        return load_vae(cfg.vae, **overrides)
 
-    # Clear any existing Hydra initialization to avoid conflicts
-    if GlobalHydra.instance().is_initialized():
-        GlobalHydra.instance().clear()
+    if model_type is ModelType.DIT:
+        return load_dit(cfg.dit, **overrides)
 
-    if model_type == ModelType.VAE:
-        # Load VAE config and model
-        with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
-            cfg = compose(config_name="vae")
-            OmegaConf.set_struct(cfg, False)
-        return load_vae(cfg, **overrides)
+    if model_type is ModelType.DIFFUSION:
+        dit_model = load_dit(cfg.dit, **overrides)
+        return load_diffusion(cfg.diffusion, dit_model=dit_model, **overrides)
 
-    elif model_type == ModelType.DIT or model_type == ModelType.DIFFUSION:
-        # Load DiT config from either a 'base_dit_training' config or a standard 'dit' config
-        if model_variant == DiTTrainingVersion.base_dit_training:
-            with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "trainers"))):
-                cfg = compose(config_name="base_dit_training")
-        else:
-            with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
-                cfg = compose(config_name="dit")
-
-        dit_model = load_dit(cfg, **overrides)
-
-        if model_type == ModelType.DIFFUSION: #TODO: dovrei passare training, non solo diff. Forse modificare in overrides
-            with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "models"))):
-                cfg = compose(config_name="diffusion")
-            diffusion_model = load_diffusion(cfg=cfg, dit_model=dit_model, tmp_param=tmp_param, **overrides)
-            return diffusion_model
-
-        return dit_model
-
-    else:
-        raise ValueError(f"Unsupported model type: {model_type}")
-
+    raise ValueError(f"Unsupported model type {model_type}")
 
 if __name__ == "__main__":
     """
