@@ -1,0 +1,10 @@
+data_synth:
+  data_dir: "/mnt/storage/nacc_sub/generated/2025-05-21_14-45-50_not_renormalized" #"/mnt/storage/nacc_sub/generated"
+  dataset_type: "nacc_synth"
+  num_samples: 500
+  stats_file: "/home/PRISMS/data/computations/nacc_stats.json"
+  batch_size: 16
+  num_workers: 4
+  # processing
+  shuffle: false
+  debug: true

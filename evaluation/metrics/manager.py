@@ -1,11 +1,15 @@
 from typing import Dict, Any, List
 
-from data.artifact_store import ArtifactStore
-from data.data_bucket import DataBucket
 from enums.metrics import MetricRequirementType, MetricType
-from utils.configurations import load_hydra_config
 from evaluation.metrics.base_metric import BaseMetric
 from data.data_operations import load_data_from_config, load_generated_data, get_model_for_metric
+from data.artifact_store import ArtifactStore
+from evaluation.metrics.FID import FidMetric
+from evaluation.metrics.other import OtherMetric
+from hydra import compose, initialize_config_dir
+import os
+from pathlib import Path
+from omegaconf import DictConfig, OmegaConf
 
 class MetricManager:
     def __init__(self, metrics: List[BaseMetric]):
@@ -21,7 +25,7 @@ class MetricManager:
         self,
         store: "ArtifactStore",
         metric_type: MetricType,
-        config: Dict[str, Any],
+        config: DictConfig,
         force: bool = False
     ) -> float:
         """
@@ -126,18 +130,18 @@ class MetricManager:
             raise ValueError(f"Unknown requirement type: {req_type}")
 
 if __name__ == "__main__":
-    from data.artifact_store import ArtifactStore
-    from evaluation.metrics.FID import FidMetric
-    from evaluation.metrics.other import OtherMetric
 
-    # Instantiate your metric classes
     fid_metric = FidMetric()
     other_metric = OtherMetric()
     manager = MetricManager(metrics=[fid_metric, other_metric])
 
     store = ArtifactStore(artifact_root="/mnt/dataset_storage/artifact_store")
 
-    fid_config = load_hydra_config("metrics", "FID_nacc_tab_cond_gen")
+    from utils.configurations import set_project_root
+    set_project_root()
+    with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "metrics"))):
+        fid_config = compose(config_name="FID_nacc_tab_cond_gen")
+        OmegaConf.set_struct(fid_config, False)
 
     fid_value = manager.compute_metric(
         store=store,

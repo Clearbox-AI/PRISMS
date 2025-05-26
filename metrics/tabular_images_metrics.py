@@ -47,10 +47,9 @@ class Metrics:
         self.images_train, self.real_df = self._extract_data_from_loader(train_loader)
         self.images_synth, self.synth_df = self._extract_data_from_loader(synth_loader)
 
+        self.images_valid, self.valid_df = None, None
         if valid_loader is not None:
-            images_valid, valid_df = self._extract_data_from_loader(valid_loader)   
-            self.images_valid = images_valid      
-            self.valid_df = valid_df
+            self.images_valid, self.valid_df = self._extract_data_from_loader(valid_loader)
 
     def _extract_data_from_loader(
             self, 
@@ -155,16 +154,16 @@ class Metrics:
         metrics_batch_size = 32 # Da mettere in config
 
         # Compute SSIM
-        # ssim_score   = self._ssim_score(self.images_valid, self.images_synth, data_range=data_range, num_samples=num_samples)
-        # msssim_train = self._ms_ssim_score(self.images_valid, self.images_synth, data_range=data_range, num_samples=num_samples)
+        ssim_score   = self._ssim_score(self.images_train, self.images_synth, data_range=data_range, num_samples=num_samples)
+        msssim_train = self._ms_ssim_score(self.images_train, self.images_synth, data_range=data_range, num_samples=num_samples)
 
         # Compute FID
-        fid_score = self._fid_score(self.images_valid, self.images_synth, batch_size=metrics_batch_size)
+        fid_score = self._fid_score(self.images_train, self.images_synth, batch_size=metrics_batch_size)
 
         # Store the metrics in a dictionary
         self.metrics = {
-            # "ssim_mean": ssim_score,
-            # "ms_ssim_mean": msssim_train,
+            "ssim_mean": ssim_score,
+            "ms_ssim_mean": msssim_train,
             "fid_mean": fid_score
         }
         return self.metrics

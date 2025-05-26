@@ -79,7 +79,7 @@ def save_checkpoint(
 def resume_from_checkpoint(
     resume_dir: Union[str, Path],
     model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
+    optimizer: Optional[torch.optim.Optimizer],
     device: torch.device,
     use_ddp: bool,
     ema_obj=None,

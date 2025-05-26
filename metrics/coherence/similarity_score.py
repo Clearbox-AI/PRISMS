@@ -2,8 +2,8 @@ import os
 from pathlib import Path
 from typing import Tuple, List, Optional
 import sys
-prisms_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
-sys.path.append(prisms_path)
+# prisms_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+# sys.path.append(prisms_path)
 
 import torch
 import torch.nn as nn

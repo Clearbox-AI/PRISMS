@@ -35,7 +35,7 @@ class NaccDataset(BaseNaccDataset):
                  target_channels: int = 3,
                  final_image_range: ImageRange = "none",
                  debug: bool = False,
-                 stats_file: Optional[Union[Path, str]] = None  # path to JSON with precomputed stats
+                 stats_file: Optional[Union[Path, str]] = None,  # path to JSON with precomputed stats
                  ):
         super().__init__(data_dir=data_dir, debug=debug)
 
@@ -61,14 +61,7 @@ class NaccDataset(BaseNaccDataset):
 
         # Set up augmentation pipeline if requested
         if self.do_augment:
-            self.image_transform = Compose([
-                RandFlip(prob=0.5, spatial_axis=0),
-                RandRotate(range_x=15, prob=0.5),
-                RandZoom(min_zoom=0.9, max_zoom=1.1, prob=0.5),
-                RandGaussianNoise(prob=0.3, std=0.05),
-                RandBiasField(degree=4, prob=0.3),
-                RandAdjustContrast(prob=0.3, gamma=(0.7, 1.3))
-            ])
+            ...
         else:
             self.image_transform = None
 
@@ -127,7 +120,7 @@ class NaccDataset(BaseNaccDataset):
 
         tab = jdata.get("patient_id", list(jdata.values())[0])
         tab = np.array(tab, dtype=np.float32)
-        tab = np.where(tab > 9999, -1, tab)  # sentinel replacement
+        tab = np.where(tab >= 9999, -1, tab)  # sentinel replacement
         tab = tab.reshape(1, -1)
 
         if self.do_tabular_normalize:
@@ -145,7 +138,7 @@ class NaccDataset(BaseNaccDataset):
         return {
             "image": image_tensor,
             "tabular": tab_tensor,
-            # "metadata": metadata,
+            "metadata": metadata,
             "dir": patient_dir,
         }
 

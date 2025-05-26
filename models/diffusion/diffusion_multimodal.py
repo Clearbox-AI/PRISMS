@@ -1,4 +1,3 @@
-from typing import Any
 from omegaconf import DictConfig
 from omegaconf import OmegaConf
 import copy

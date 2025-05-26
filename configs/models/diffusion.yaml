@@ -66,8 +66,7 @@ diffusion:
   P_mean: -0.6
   P_std: 1.2
 
-  # Churn (usually switched off)
   S_churn: 0.0
   S_min: 0.0
-  S_max: inf
+  S_max: .inf
   S_noise: 1.0
