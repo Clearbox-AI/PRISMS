@@ -117,7 +117,7 @@ def train_model(cfg: DictConfig) -> None:
         torch.cuda.set_device(local_rank)
 
     # 2) Load training data
-    train_loader = load_training_data(cfg)
+    train_loader, _ = load_training_data(cfg)
 
     # # 3) Load or create VAE
     # device = torch.device(f"cuda:{local_rank}") if cfg.training.device == "cuda" else torch.device("cpu")

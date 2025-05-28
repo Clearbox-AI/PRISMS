@@ -4,7 +4,7 @@ import numpy as np
 import torch.distributed as dist
 import torch
 import glob
-from typing import Optional
+from typing import Optional, Tuple
 
 from torch.utils.data import DataLoader, DistributedSampler
 from sklearn.preprocessing import StandardScaler
@@ -17,20 +17,48 @@ from data.nacc_dataset import NaccDataset
 from data.nacc_dataset_synth import NaccSynthDataset
 from enums.data import DatasetType, ImageRange
 from torch.utils.data import Subset
-import random
+from sklearn.model_selection import train_test_split
 
 
-def load_training_data(cfg: DictConfig, real: Optional[bool]=True) -> DataLoader:
+def _make_sampler(ds, *, shuffle: bool, drop_last: bool = True) -> Optional[torch.utils.data.Sampler]:
+    if dist.is_available() and dist.is_initialized():
+        return DistributedSampler(
+            ds,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=shuffle,
+            drop_last=drop_last,
+        )
+    return None
+
+def _extract_group_labels(dataset) -> np.ndarray:
     """
-    Create a DataLoader for your dataset.
-    1) Possibly compute stats if needed.
-    2) Initialize NaccDataset with those stats.
-    3) Return DataLoader with (optionally) a DistributedSampler.
+    Walk once through the dataset *without touching disk again* and return
+    an array of 0 ( "CN") / 1 ( "AD") labels drawn from the metadata.
+    """
+    labels = []
+    for itm in dataset:
+        group = itm["metadata"].get("GROUP", "CN")
+        labels.append(0 if group == "CN" else 1)
+    return np.array(labels, dtype=np.int64)
+
+
+def load_training_data(cfg: DictConfig, *, real: bool = True) -> Union[DataLoader, Tuple[DataLoader, DataLoader]]:
+    """
+    Build DataLoader(s) for training (and, optionally, validation).
+
+    Behaviour
+    ---------
+    • If `cfg.data.split.enable` is **missing or False**  →  returns **one**
+      DataLoader with the full dataset (100 % train)
+    • If `cfg.data.split.enable` is **True**  →  returns a pair
+      (**train_loader, val_loader**) produced with
+      `sklearn.model_selection.train_test_split`, using **all** keyword
+      arguments found under `cfg.data.split.kwargs` (and sensible defaults).
     """
 
     if real:
         if cfg.data.dataset_type.lower() == DatasetType.NACC.value:
-            # Step 1: Check if we need to precompute stats
             data_dir = cfg.data.data_dir
             stats_dir = cfg.data.get("stats_file") or Path(Path(__file__).resolve().parent, "computations")
             stats_path = Path(stats_dir, "nacc_stats.json")
@@ -42,9 +70,8 @@ def load_training_data(cfg: DictConfig, real: Optional[bool]=True) -> DataLoader
 
             batch_size = cfg.data.batch_size
             num_workers = cfg.data.num_workers
-            shuffle = cfg.data.shuffle
+            shuffle_flag = cfg.data.shuffle
 
-            # Step 2: Create the dataset (the dataset will load stats from stats_path)
             dataset = NaccDataset(
                 data_dir=data_dir,
                 image_height=cfg.data.image_height,
@@ -54,58 +81,180 @@ def load_training_data(cfg: DictConfig, real: Optional[bool]=True) -> DataLoader
                 do_image_normalize=cfg.data.do_image_normalize,
                 do_tabular_normalize=cfg.data.do_tabular_normalize,
                 target_channels=cfg.data.target_channels,
-                final_image_range=ImageRange(cfg.data.final_image_range) ,
+                final_image_range=ImageRange(cfg.data.final_image_range),
                 debug=cfg.data.debug,
-                stats_file=stats_path
+                stats_file=stats_path,
             )
         else:
-            # to implement for other datasets
             raise NotImplementedError
     else:
         if cfg.data_synth.dataset_type.lower() == DatasetType.NACC_SYNTH.value:
             data_dir = cfg.data_synth.data_dir
-
             batch_size = cfg.data_synth.batch_size
             num_workers = cfg.data_synth.num_workers
-            shuffle = cfg.data_synth.shuffle
+            shuffle_flag = cfg.data_synth.shuffle
 
             dataset = NaccSynthDataset(
                 data_dir=data_dir,
                 debug=cfg.data_synth.debug,
             )
         else:
-            # to implement for other datasets
             raise NotImplementedError
 
-
-    # Step 3: Build distributed sampler if needed
-    world_size, rank = 1, 0
-    if dist.is_available() and dist.is_initialized():
-        world_size = dist.get_world_size()
-        rank = dist.get_rank()
-
-    if world_size > 1:
-        sampler = DistributedSampler(
+    # ------------------------------------------------------------------ #
+    # B. Decide whether we must do a train/val split
+    # ------------------------------------------------------------------ #
+    split_cfg = cfg.data.get("split")
+    if not split_cfg or not split_cfg.get("enable", False):
+        # 100 % TRAIN
+        sampler = _make_sampler(dataset, shuffle=True)
+        loader  = DataLoader(
             dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True,
-            drop_last=True
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True,
+            sampler=sampler,
+            shuffle=sampler is None and shuffle_flag,
         )
-    else:
-        sampler = None
+        return loader
 
-    loader = DataLoader(
-        dataset=dataset,
+    # ------------------------------------------------------------------ #
+    # C. Build TRAIN / VAL subsets
+    # ------------------------------------------------------------------ #
+    # ------ 1. collect kwargs for train_test_split -----------------------
+    default_kwargs = {"test_size": 0.2, "random_state": 1234, "shuffle": True}
+    user_kwargs = OmegaConf.to_container(split_cfg.get("kwargs", {}), resolve=True)
+    tts_kwargs = {**default_kwargs, **(user_kwargs or {})}
+
+    # ------ 2. stratify handling (bool → labels array or None) ----------
+    stratify_flag = tts_kwargs.pop("stratify", True)
+    if stratify_flag:
+        tts_kwargs["stratify"] = _extract_group_labels(dataset)
+    else:
+        tts_kwargs["stratify"] = None
+
+    indices = np.arange(len(dataset))
+    train_idx, val_idx = train_test_split(indices, **tts_kwargs)
+
+    train_subset = Subset(dataset, train_idx)
+    val_subset   = Subset(dataset, val_idx)
+
+    # ------------------------------------------------------------------ #
+    # D. Build DataLoaders with DDP-aware samplers
+    # ------------------------------------------------------------------ #
+    common_kwargs = dict(
         batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
-        sampler=sampler,
-        shuffle=sampler is None and shuffle
     )
 
-    return loader
+    train_sampler = _make_sampler(train_subset, shuffle=True)
+    val_sampler = _make_sampler(val_subset,   shuffle=False)
+
+    train_loader = DataLoader(
+        train_subset,
+        sampler=train_sampler,
+        shuffle=train_sampler is None and shuffle_flag,
+        **common_kwargs,
+    )
+
+    val_loader = DataLoader(
+        val_subset,
+        sampler=val_sampler,
+        shuffle=False,
+        **common_kwargs,
+    )
+
+    return train_loader, val_loader
+
+# def load_training_data(cfg: DictConfig, real: Optional[bool]=True) -> DataLoader:
+#     """
+#     Create a DataLoader for your dataset.
+#     1) Possibly compute stats if needed.
+#     2) Initialize NaccDataset with those stats.
+#     3) Return DataLoader with (optionally) a DistributedSampler.
+#     """
+#
+#     if real:
+#         if cfg.data.dataset_type.lower() == DatasetType.NACC.value:
+#             # Step 1: Check if we need to precompute stats
+#             data_dir = cfg.data.data_dir
+#             stats_dir = cfg.data.get("stats_file") or Path(Path(__file__).resolve().parent, "computations")
+#             stats_path = Path(stats_dir, "nacc_stats.json")
+#             compute_dataset_stats(data_dir, stats_path)
+#
+#             meta_path = Path(stats_dir, "nacc_meta.json")
+#             features_path = Path(stats_dir, "feature_desc.json")
+#             compute_dataset_meta(data_dir, meta_path, features_path)
+#
+#             batch_size = cfg.data.batch_size
+#             num_workers = cfg.data.num_workers
+#             shuffle = cfg.data.shuffle
+#
+#             # Step 2: Create the dataset (the dataset will load stats from stats_path)
+#             dataset = NaccDataset(
+#                 data_dir=data_dir,
+#                 image_height=cfg.data.image_height,
+#                 image_width=cfg.data.image_width,
+#                 domain=cfg.data.domain,
+#                 do_augment=cfg.data.do_augment,
+#                 do_image_normalize=cfg.data.do_image_normalize,
+#                 do_tabular_normalize=cfg.data.do_tabular_normalize,
+#                 target_channels=cfg.data.target_channels,
+#                 final_image_range=ImageRange(cfg.data.final_image_range) ,
+#                 debug=cfg.data.debug,
+#                 stats_file=stats_path
+#             )
+#         else:
+#             # to implement for other datasets
+#             raise NotImplementedError
+#     else:
+#         if cfg.data_synth.dataset_type.lower() == DatasetType.NACC_SYNTH.value:
+#             data_dir = cfg.data_synth.data_dir
+#
+#             batch_size = cfg.data_synth.batch_size
+#             num_workers = cfg.data_synth.num_workers
+#             shuffle = cfg.data_synth.shuffle
+#
+#             dataset = NaccSynthDataset(
+#                 data_dir=data_dir,
+#                 debug=cfg.data_synth.debug,
+#             )
+#         else:
+#             # to implement for other datasets
+#             raise NotImplementedError
+#
+#
+#     # Step 3: Build distributed sampler if needed
+#     world_size, rank = 1, 0
+#     if dist.is_available() and dist.is_initialized():
+#         world_size = dist.get_world_size()
+#         rank = dist.get_rank()
+#
+#     if world_size > 1:
+#         sampler = DistributedSampler(
+#             dataset,
+#             num_replicas=world_size,
+#             rank=rank,
+#             shuffle=True,
+#             drop_last=True
+#         )
+#     else:
+#         sampler = None
+#
+#     loader = DataLoader(
+#         dataset=dataset,
+#         batch_size=batch_size,
+#         num_workers=num_workers,
+#         pin_memory=True,
+#         drop_last=True,
+#         sampler=sampler,
+#         shuffle=sampler is None and shuffle
+#     )
+#
+#     return loader
 
 
 def compute_dataset_stats(data_dir: Union[Path, str], stats_path: Union[Path, str]):

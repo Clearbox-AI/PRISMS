@@ -20,3 +20,11 @@ data:
   shuffle: false
   # debugging
   debug: true
+
+  split:
+    enable: true       # set false to get 100 %-train behaviour
+    kwargs: # will be **expanded into train_test_split
+      test_size: 0.2   # val fraction (may also be int)
+      random_state: 42 # reproducible
+      shuffle: true
+      stratify: true   # honour class ratio; you may drop it for unsupervised cases
