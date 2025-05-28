@@ -15,7 +15,7 @@ data:
   domain: "mri"
   final_image_range: "minus1to1"
   do_image_normalize: true
-  do_tabular_normalize: true
+  do_tabular_normalize: false
   do_augment: false
   shuffle: false
   # debugging

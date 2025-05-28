@@ -60,13 +60,13 @@ diffusion:
 
   # EDM schedule
   sigma_min: 2e-3
-  sigma_max: 80.0
-  num_steps: 18
+  sigma_max: 50.0
+  num_steps: 40
   rho: 7
-  P_mean: -0.6
+  P_mean: -1.2
   P_std: 1.2
 
-  S_churn: 0.0
-  S_min: 0.0
-  S_max: .inf
+  S_churn: 0.30
+  S_min: 2e-3
+  S_max: 30.0
   S_noise: 1.0

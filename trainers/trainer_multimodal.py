@@ -65,7 +65,7 @@ def train_one_epoch(
             model.eval()
             with torch.no_grad():
                 latents_img_out, latents_tab_out = ddp_sample(
-                    model_ema=model,
+                    model=model,
                     batch_size=4,
                 )
 
@@ -138,10 +138,46 @@ def train_model(cfg: DictConfig) -> None:
     vae = load_model(ModelType.VAE, cfg=cfg).to(device)
     vae.requires_grad_(False).eval()  # keep VAE frozen
 
+    from models.diffusion.diffusion_multimodal import build_transforms_from_schema
+    tab_tf = build_transforms_from_schema("/home/PRISMS/data/computations/nacc_meta.json")
+    # fit standardisation stats on one pass over the loader
+
+    # 1) Temporarily disable standardisation
+    orig_apply_std = [tf.apply_std for tf in tab_tf]
+    for tf in tab_tf:
+        tf.apply_std = False
+    # 2) One full pass to fit μ/σ in transformed space
+    sums = torch.zeros(len(tab_tf), device=device)
+    sumsq = torch.zeros_like(sums)
+    count = 0
+    for batch in train_loader:
+        x_raw = batch["tabular"].to(device)
+        cols = [tab_tf[i](x_raw[:, i:i + 1]).squeeze(1) for i in range(len(tab_tf))]
+        x_lat = torch.stack(cols, dim=1)  # (B, F) after non-linear map
+        sums += x_lat.sum(0)
+        sumsq += (x_lat ** 2).sum(0)
+        count += x_lat.size(0)
+
+    mu = sums / count
+    sig = ((sumsq / count) - mu ** 2).sqrt().clamp_min_(1e-9)
+    # 3) Register buffers and restore normal behaviour
+    for i, tf in enumerate(tab_tf):
+        # create *or* overwrite – works both when restarting and resuming
+        if 'mu' in dict(tf.named_buffers()):
+            tf.mu.data.copy_(mu[i])
+            tf.sig.data.copy_(sig[i])
+        else:
+            tf.register_buffer('mu', mu[i])
+            tf.register_buffer('sig', sig[i])
+
+        tf.apply_std = orig_apply_std[i]  # usually True again
+
+
     # 4) Build the multi-modal diffusion model
     mm_diff_model = load_model(
         model_type=ModelType.DIFFUSION,
         cfg=cfg,
+        tab_transforms=tab_tf
     ).to(device)
 
     # 5) Wrap the diffusion model in DDP (if desired)

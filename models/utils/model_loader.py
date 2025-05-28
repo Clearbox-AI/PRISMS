@@ -86,7 +86,7 @@ from models.vae.vae import load_vae
 #     else:
 #         raise ValueError(f"Unsupported model type: {model_type}")
 
-def load_model(model_type: ModelType, cfg: DictConfig, **overrides: Any,) -> nn.Module:
+def load_model(model_type: ModelType, cfg: DictConfig, tab_transforms=None, **overrides: Any,) -> nn.Module:
     """
     Unified entry-point to build VAE, DiT or Diffusion.
 
@@ -119,8 +119,9 @@ def load_model(model_type: ModelType, cfg: DictConfig, **overrides: Any,) -> nn.
         return load_dit(cfg.dit, **overrides)
 
     if model_type is ModelType.DIFFUSION:
-        dit_model = load_dit(cfg.dit, **overrides)
-        return load_diffusion(cfg.diffusion, dit_model=dit_model, **overrides)
+        # dit_model = load_dit(cfg.dit, **overrides) #TODO: fix, mechanisms to pass overides that could differs between dit and diff
+        dit_model = load_dit(cfg.dit)
+        return load_diffusion(cfg.diffusion, dit_model=dit_model, tab_transforms=tab_transforms, **overrides)
 
     raise ValueError(f"Unsupported model type {model_type}")
 

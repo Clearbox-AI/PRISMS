@@ -50,7 +50,7 @@ data:
   num_workers: 4
   # processing
   do_image_normalize: true
-  do_tabular_normalize: true
+  do_tabular_normalize: false
   do_augment: false
   # debugging
   debug: false
@@ -90,7 +90,7 @@ training:
   sample_conditioning: 1.0
   sample_steps: 30
   sample_latents_path: ""
-  sample_interval: 200
+  sample_interval: 1
   # logging/saving
   log_interval: 10
   base_save_path: "/mnt/storage/nacc_sub/dit"
@@ -99,5 +99,5 @@ training:
   resume_checkpoint_dir: "/mnt/storage/nacc_sub/dit/2025-04-24_06-39-56_arch+add16"
 
 distributed:
-  use_ddp: true
+  use_ddp: false
   backend: nccl
