@@ -49,9 +49,9 @@ def load_vae(cfg: DictConfig, **overrides):
     final_cfg = _merge_cfg(cfg, overrides)
 
     vae = AutoencoderKL.from_pretrained(
-            final_cfg.model_name,
-            subfolder=final_cfg.subfolder,
-            torch_dtype=getattr(torch, final_cfg.dtype),
+            final_cfg["model_name"],
+            subfolder=final_cfg["subfolder"],
+            torch_dtype=getattr(torch, final_cfg["dtype"]),
         )
     return vae
 

@@ -28,6 +28,16 @@ set_project_root()                              # ensures $PROJECT_ROOT
 
 CFG_DIR = Path(os.environ["PROJECT_ROOT"], "configs", "datasets")
 
+def denormalise(img, mean, std, final_range="auto"):
+    """
+    img : torch.Tensor [C,H,W] already on CPU
+    mean, std : scalars used during training
+    final_range : "auto" rescales to 0-1, "none" leaves raw values
+    """
+    img = img * std + mean            # undo z-score
+    if final_range == "auto":
+        img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+    return img
 
 def build_loader(cfg_name: str, *, real: bool) -> DataLoader:
     """
@@ -49,7 +59,7 @@ def build_loader(cfg_name: str, *, real: bool) -> DataLoader:
     )
 
 
-ld_nacc  = build_loader("nacc",       real=True)
+ld_nacc  = build_loader("nacc", real=True)
 ld_synth = build_loader("nacc_synth", real=False)
 
 # ------------------------------------------------------------------ #
@@ -63,6 +73,18 @@ def first_k_images(loader: DataLoader, k: int) -> List[torch.Tensor]:
         if len(out) == k:
             break
     return out
+
+# def first_k_images(loader: DataLoader, k: int) -> List[torch.Tensor]:
+#     """Fetch the first *k* image tensors from *loader* (shape C,H,W)."""
+#     out = []
+#     for batch in loader:
+#         x = batch["image"][0].cpu()  # [C,H,W]
+#         x_disp = denormalise(x, ds.image_mean, ds.image_std)
+#         plt.imshow(x_disp.permute(1, 2, 0).squeeze(), cmap='gray',
+#                    vmin=0, vmax=1)  # keep full contrast
+#         plt.axis('off')
+#         break
+#     return out
 
 
 def make_montage(tensors, nrow=5, ncol=5, pad=2, pad_val=0):
@@ -115,6 +137,12 @@ def show_montages(imgs: List[torch.Tensor], title_prefix: str):
 # ------------------------------------------------------------------ #
 imgs_nacc  = first_k_images(ld_nacc,  50)
 imgs_synth = first_k_images(ld_synth, 50)
+
+mean_n, std_n = ld_nacc.dataset.image_mean,  ld_nacc.dataset.image_std
+imgs_nacc  = [denormalise(img, mean_n,  std_n)  for img in imgs_nacc]
+
+# mean_s, std_s = ld_synth.dataset.image_mean, ld_synth.dataset.image_std
+# imgs_synth = [denormalise(img, mean_s, std_s)  for img in imgs_synth]
 
 show_montages(imgs_nacc,  "NaccDataset")
 show_montages(imgs_synth, "NaccSynthDataset")

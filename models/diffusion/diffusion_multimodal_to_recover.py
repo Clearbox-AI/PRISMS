@@ -9,55 +9,6 @@ from functools import partial
 from typing import Optional, Tuple
 from easydict import EasyDict
 
-# -----------------------------------------------------------------------------
-# 1.  Column‑wise invertible transforms
-# -----------------------------------------------------------------------------
-class ColumnTransform(nn.Module):
-    """Base class – every transform must be invertible."""
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # data → ℝ
-        raise NotImplementedError
-
-    def inverse(self, z: torch.Tensor) -> torch.Tensor:  # ℝ → data
-        raise NotImplementedError
-
-
-class IdentityTransform(ColumnTransform):
-    """Leaves unbounded columns unchanged (mean‑std scaling is optional)."""
-    def forward(self, x):
-        return x
-
-    def inverse(self, z):
-        return z
-
-
-class BoundedScalar(ColumnTransform):
-    """Squash a feature with *known* bounds (e.g. age ∈ [0,100]) to ℝ.
-
-    Uses the atanh–tanh pair described in TabDDPM & SDV.
-    """
-    def __init__(self, lo: float, hi: float):
-        super().__init__()
-        self.register_buffer("lo", torch.tensor(lo))
-        self.register_buffer("hi", torch.tensor(hi))
-        self.register_buffer("scale", torch.tensor((hi - lo) / 2.0))
-        self.register_buffer("mid", torch.tensor((hi + lo) / 2.0))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        z = (x - self.mid) / self.scale
-        # numeric safeguard – stay inside (-1,1)
-        return torch.atanh(z.clamp(-0.999, 0.999))
-
-    def inverse(self, z: torch.Tensor) -> torch.Tensor:
-        return self.mid + self.scale * torch.tanh(z)
-
-class NonNegative(ColumnTransform):
-    """Log‑exp pair for features constrained to [0,∞)."""
-    def forward(self, x):
-        # add 1e-6 for numerical stability if x can be exactly 0
-        return torch.log1p(x)
-
-    def inverse(self, z):
-        return torch.expm1(z).clamp_min(0.0)
 
 # helper
 def _make_t(batch, sigma_scalar):
@@ -252,10 +203,6 @@ class MultiModalDiffusion(nn.Module):
         if return_latents:
             return x_img, x_tab
 
-        # -------- post‑process to original spaces --------------------------
-        # x_tab = x_tab * self.tab_scaler_std               # un‑standardise
-        # leave x_img as latent; caller can VAE.decode(...)
-        # return x_img / self.img_latent_scale, x_tab
         return x_img, x_tab
 
     # ---------------------------------------------------------------------

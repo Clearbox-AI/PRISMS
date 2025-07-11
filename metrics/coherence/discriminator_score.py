@@ -31,11 +31,7 @@ class ImageEncoder(nn.Module):
 
 
 class TabularEncoder(nn.Module):
-    """
-    Simple MLP for encoding tabular data.
-    The input dimension is 157 (as per the original code) and the output dimension is 128.
-    """
-    def __init__(self, input_dim: int = 157, output_dim: int = 128):
+    def __init__(self, input_dim: int, output_dim: int = 128):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 256),
@@ -48,26 +44,17 @@ class TabularEncoder(nn.Module):
 
 
 class Discriminator(nn.Module):
-    """
-    Full coherence-discriminator pipeline:
-    image_encoder + tabular_encoder + classifier.
-    The classifier is a simple MLP that takes the concatenated
-    outputs of the image and tabular encoders. 
-    The model is trained to distinguish between coherent
-    (image, tabular) pairs and incoherent pairs.
-    """
-    def __init__(self, embed_dim: int = 128):
+    def __init__(self, embed_dim: int = 128, tabular_dim: int = 158):
         super().__init__()
-
         self.image_encoder   = ImageEncoder(output_dim=embed_dim)
-        self.tabular_encoder = TabularEncoder(output_dim=embed_dim)
-        self.classifier      = nn.Sequential(
-            nn.Linear(2 * embed_dim, 128),
+        self.tabular_encoder = TabularEncoder(input_dim=tabular_dim,
+                                              output_dim=embed_dim)
+        self.classifier = nn.Sequential(
+            nn.Linear(2*embed_dim, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
             nn.Sigmoid()
         )
-
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.to(self.device)
 
@@ -104,7 +91,7 @@ class Discriminator(nn.Module):
 
             for batch in tqdm.tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}"):
                 x_img = batch['image'].to(self.device)     # (B,1,256,256)
-                x_tab = batch['tabular'].to(self.device)   # (B,157)
+                x_tab = batch['tabular'].to(self.device)   # (B,158)
                 B     = x_img.size(0)
 
                 # build positive / negative pairs
@@ -154,7 +141,6 @@ class Discriminator(nn.Module):
         self.tabular_encoder.eval()
         print(f"✓ Full model loaded from ←  {checkpoint_path}")
 
-    @torch.no_grad()
     def evaluate(self,
                  loader,
                  checkpoint_path: str | None = None,
@@ -183,8 +169,10 @@ class Discriminator(nn.Module):
         else:
             self._load_discriminator_models(checkpoint_path)
 
-        return self._discriminator_score(loader)
-        
+        with torch.no_grad():
+            return self._discriminator_score(loader)
+
+    @torch.no_grad()
     def _discriminator_score(self, loader: DataLoader) -> float:
         """
         Compute the coherence score for the provided dataloader.
@@ -234,7 +222,7 @@ def create_shuffled_tabular_loader(original_loader):
         all_tabular.append(batch['tabular'])
 
     images_tensor = torch.cat(all_images, dim=0)  # (N, 1, 256, 256)
-    tabular_tensor = torch.cat(all_tabular, dim=0)  # (N, 157)
+    tabular_tensor = torch.cat(all_tabular, dim=0)  # (N, 158)
 
     # Shuffle only the tabular data
     shuffled_indices = torch.randperm(tabular_tensor.size(0))
@@ -254,3 +242,45 @@ def create_shuffled_tabular_loader(original_loader):
     shuffled_loader = DataLoader(dataset, batch_size=original_loader.batch_size,
                                  shuffle=False, collate_fn=collate_fn)
     return shuffled_loader
+
+
+
+
+
+
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+class IncoherentPairDataset(Dataset):
+    """
+    Wraps an existing dataset that yields dicts with keys
+    'image' and 'tabular'.  The tabular branch is shuffled
+    once at construction time.
+    """
+    def __init__(self, src_loader: DataLoader, generator: torch.Generator | None = None):
+        # 1. materialise the tensors on *CPU*
+        imgs, tabs = [], []
+        for batch in src_loader:
+            imgs.append(batch["image"].cpu())
+            tabs.append(batch["tabular"].cpu())
+        self.images  = torch.cat(imgs,  dim=0)         # (N, C, H, W)
+        self.tabular = torch.cat(tabs, dim=0)          # (N, F)
+
+        # 2. make a one-time permutation of the tabular rows
+        g = generator or torch.Generator()
+        perm = torch.randperm(len(self.tabular), generator=g)   # :contentReference[oaicite:2]{index=2}
+        self.tabular = self.tabular[perm]
+
+    def __len__(self):  return len(self.images)
+
+    def __getitem__(self, idx: int):
+        return {"image": self.images[idx],
+                "tabular": self.tabular[idx]}
+
+def make_incoherent_loader(src_loader: DataLoader,
+                           generator: torch.Generator | None = None):
+    dataset = IncoherentPairDataset(src_loader, generator)
+    return DataLoader(dataset,
+                      batch_size=src_loader.batch_size,
+                      shuffle=False,                   # already incoherent
+                      pin_memory=True)                 # faster GPU copy :contentReference[oaicite:3]{index=3}

@@ -38,12 +38,13 @@ def train_one_epoch(
         # 1) Get data
         images = batch['image'].to(device, non_blocking=True)
         tab_data = batch['tabular'].to(device, non_blocking=True)
+        label = torch.tensor([0 if el == "CN" else 1 for el in batch['metadata']["GROUP"]]).to(device, non_blocking=True)
 
         # 2) Encode images -> latents (via VAE)
         latents = encode_images(vae, images, cfg.vae.scaling_factor)
 
         # 3) Forward and loss
-        loss_total, loss_img, loss_tab = model(latents, tab_data)
+        loss_total, loss_img, loss_tab = model(latents, tab_data, labels=label)
         last_total_loss = loss_total.item()
 
         optimizer.zero_grad(set_to_none=True)
@@ -55,9 +56,9 @@ def train_one_epoch(
         # 4) Logging (only rank-0 prints)
         if is_main_process() and (global_step % cfg.training.log_interval == 0):
             msg = (f"[Epoch {epoch + 1} | Step {global_step}] "
-                   f"Img Loss: {loss_img.item():.4f}")
-            msg += f" | Tab Loss: {loss_tab.item():.4f}"
-            msg += f" | Total: {last_total_loss:.4f}"
+                   f"Img Loss: {loss_img.item():.7f}")
+            msg += f" | Tab Loss: {loss_tab.item():.7f}"
+            msg += f" | Total: {last_total_loss:.7f}"
             print(msg)
 
         # 5) Sampling (only rank-0)
@@ -67,6 +68,8 @@ def train_one_epoch(
                 latents_img_out, latents_tab_out = ddp_sample(
                     model=model,
                     batch_size=4,
+                    guidance_scale=2.5,
+                    # labels = torch.tensor([1,0,0,1]).to(device, non_blocking=True)
                 )
 
                 # Now decode latents -> images
@@ -119,65 +122,18 @@ def train_model(cfg: DictConfig) -> None:
     # 2) Load training data
     train_loader, _ = load_training_data(cfg)
 
-    # # 3) Load or create VAE
-    # device = torch.device(f"cuda:{local_rank}") if cfg.training.device == "cuda" else torch.device("cpu")
-    # vae = load_model(model_type=ModelType.VAE, **cfg.vae).to(device)
-    # vae.requires_grad_(False)
-    # vae.eval()  # Typically we keep the VAE frozen
-    #
-    # # 4) Build your diffusion model
-    # mm_diff_model = load_model(
-    #     model_type=ModelType.DIFFUSION,
-    #     model_variant=DiTTrainingVersion.base_dit_training,
-    #     **cfg.diffusion
-    # )
-    # mm_diff_model.to(device)
-
     # 3) Load or create VAE
     device = torch.device(f"cuda:{local_rank}") if cfg.training.device == "cuda" else torch.device("cpu")
     vae = load_model(ModelType.VAE, cfg=cfg).to(device)
     vae.requires_grad_(False).eval()  # keep VAE frozen
 
-    from models.diffusion.diffusion_multimodal import build_transforms_from_schema
-    tab_tf = build_transforms_from_schema("/home/PRISMS/data/computations/nacc_meta.json")
-    # fit standardisation stats on one pass over the loader
-
-    # 1) Temporarily disable standardisation
-    orig_apply_std = [tf.apply_std for tf in tab_tf]
-    for tf in tab_tf:
-        tf.apply_std = False
-    # 2) One full pass to fit μ/σ in transformed space
-    sums = torch.zeros(len(tab_tf), device=device)
-    sumsq = torch.zeros_like(sums)
-    count = 0
-    for batch in train_loader:
-        x_raw = batch["tabular"].to(device)
-        cols = [tab_tf[i](x_raw[:, i:i + 1]).squeeze(1) for i in range(len(tab_tf))]
-        x_lat = torch.stack(cols, dim=1)  # (B, F) after non-linear map
-        sums += x_lat.sum(0)
-        sumsq += (x_lat ** 2).sum(0)
-        count += x_lat.size(0)
-
-    mu = sums / count
-    sig = ((sumsq / count) - mu ** 2).sqrt().clamp_min_(1e-9)
-    # 3) Register buffers and restore normal behaviour
-    for i, tf in enumerate(tab_tf):
-        # create *or* overwrite – works both when restarting and resuming
-        if 'mu' in dict(tf.named_buffers()):
-            tf.mu.data.copy_(mu[i])
-            tf.sig.data.copy_(sig[i])
-        else:
-            tf.register_buffer('mu', mu[i])
-            tf.register_buffer('sig', sig[i])
-
-        tf.apply_std = orig_apply_std[i]  # usually True again
-
-
     # 4) Build the multi-modal diffusion model
+    from data.tabular_transforms import FittedTransforms
+    ft = FittedTransforms.load(Path("/home/PRISMS/data/computations/tab_ft.pkl"))
     mm_diff_model = load_model(
         model_type=ModelType.DIFFUSION,
         cfg=cfg,
-        tab_transforms=tab_tf
+        tab_transforms=ft
     ).to(device)
 
     # 5) Wrap the diffusion model in DDP (if desired)

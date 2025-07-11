@@ -1,6 +1,6 @@
 from typing import Tuple
 import os
-import sys 
+import sys
 prisms_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(prisms_path)
 import itertools
@@ -12,6 +12,7 @@ import torch
 from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 from piq import ssim, multi_scale_ssim, FID
 
@@ -20,16 +21,18 @@ from monai.networks.nets import densenet121
 from sure.utility import compute_statistical_metrics, compute_mutual_info, compute_utility_metrics_class
 from sure.privacy import distance_to_closest_record, dcr_stats, number_of_dcr_equal_to_zero, validation_dcr_test
 from sure import report
+from data.tabular_transforms import FittedTransforms, inverse_transform
 
 class Metrics:
     """
     Class to compute metrics for tabular and image data.
     """
     def __init__(
-            self, 
-            train_loader: torch.utils.data.dataloader.DataLoader, 
-            synth_loader: torch.utils.data.dataloader.DataLoader, 
+            self,
+            train_loader: torch.utils.data.dataloader.DataLoader,
+            synth_loader: torch.utils.data.dataloader.DataLoader,
             valid_loader: torch.utils.data.dataloader.DataLoader = None,
+            ft: FittedTransforms = None,
         ):
         """
         Initialize the TabularMetrics class.
@@ -40,21 +43,24 @@ class Metrics:
             synth_loader (torch.utils.data.dataloader.DataLoader): DataLoader for the synthetic data.
             preprocessor (Preprocessor, optional): Preprocessor instance for data preprocessing. Defaults to None.
         """
+        self.ft = ft
         # Check if the device is available
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Load the training and synthetic data
-        self.images_train, self.real_df = self._extract_data_from_loader(train_loader)
-        self.images_synth, self.synth_df = self._extract_data_from_loader(synth_loader)
+        # Load data (+ row counts for label-alignment)
+        self.images_train, self.real_df, self.n_train = self._extract_data_from_loader(train_loader)
+        self.images_synth, self.synth_df, self.n_synth = self._extract_data_from_loader(synth_loader, False)
 
-        self.images_valid, self.valid_df = None, None
+
+        self.images_valid, self.valid_df, self.n_valid = None, None, None
         if valid_loader is not None:
-            self.images_valid, self.valid_df = self._extract_data_from_loader(valid_loader)
+            self.images_valid, self.valid_df, self.n_valid = self._extract_data_from_loader(valid_loader)
 
     def _extract_data_from_loader(
-            self, 
-            loader
-        ) -> Tuple[torch.Tensor, pl.DataFrame]:
+            self,
+            loader,
+            use_tf=True
+        ) -> Tuple[torch.Tensor, pl.DataFrame, int]:
         """
         Returns the images as a torch tensor and tabular data as a polars DataFrames.
         """
@@ -64,16 +70,22 @@ class Metrics:
         # Load the training data
         for batch in loader:
             images_list.append(batch['image'].to("cpu", non_blocking=True))
-            tab_data_list.append(batch['tabular'].to("cpu", non_blocking=True))
+            if self.ft and use_tf:
+                # inverse transform tabular
+                tab_data_list.append(inverse_transform(self.ft, batch['tabular'].to("cpu", non_blocking=True)))
+            else:
+                tab_data_list.append(batch['tabular'].to("cpu", non_blocking=True))
 
         images = torch.cat(images_list, dim=0)
-        tab_data = torch.cat(tab_data_list, dim=0).numpy()
+        tab_data = np.concatenate(tab_data_list, axis=0)
+        # tab_data = torch.cat(tab_data_list, dim=0).numpy()
 
         columns = [f"col_{i}" for i in range(tab_data.shape[1])]
         df = pl.DataFrame(tab_data, schema=columns)
-        
-        return images, df
-    
+
+        # Return images, dataframe, **and the number of rows actually yielded**
+        return images, df, df.height
+
     def tabular(self, train_label=None, synth_label=None, valid_label=None):
         """
         Compute the tabular metrics (statistical metrics, mutual information, distance to closest record, TSTR) between the real and synthetic data.
@@ -93,7 +105,7 @@ class Metrics:
         corr_real, corr_synth, corr_difference = compute_mutual_info(self.real_df, self.synth_df, path_to_json=path_to_json)
 
         # Distance to closest record
-        dcr_synth_train       = distance_to_closest_record("synth_train", self.synth_df, self.real_df, path_to_json=path_to_json)
+        dcr_synth_train = distance_to_closest_record("synth_train", self.synth_df, self.real_df, path_to_json=path_to_json)
         dcr_stats_synth_train = dcr_stats("synth_train", dcr_synth_train, path_to_json=path_to_json)
         dcr_zero_synth_train  = number_of_dcr_equal_to_zero("synth_train", dcr_synth_train, path_to_json=path_to_json)
         if self.valid_df is not None:
@@ -104,12 +116,15 @@ class Metrics:
 
         # TSTR
         if train_label is not None:
+            # Align y_* lengths with the rows that actually passed through the loaders
             X_train = self.real_df
-            y_train = train_label
+            y_train = train_label[:self.n_train]
             X_synth = self.synth_df
-            y_synth = synth_label
+            y_synth = synth_label[:self.n_synth]
             X_test = self.valid_df if self.valid_df is not None else self.real_df
-            y_test = valid_label if self.valid_df is not None else train_label
+            test_len = self.n_valid if self.valid_df is not None else self.n_train
+            y_test = (valid_label if self.valid_df is not None else train_label)[:test_len]
+
             TSTR_train, TSTR_synth, delta = compute_utility_metrics_class(X_train, X_synth, X_test, y_train, y_synth, y_test, path_to_json=path_to_json)
 
         # Store the metrics in a dictionary
@@ -138,7 +153,7 @@ class Metrics:
             } if train_label is not None else None
         }
         return self.metrics
-    
+
     def tab_report(self):
         """
         Generate a report of the tabular metrics.
@@ -166,7 +181,9 @@ class Metrics:
             "ms_ssim_mean": msssim_train,
             "fid_mean": fid_score
         }
+        print(self.metrics)
         return self.metrics
+
 
     # def _get_nth_batch_norm(self, x, y, n, batch_size):
     #     """
@@ -179,7 +196,7 @@ class Metrics:
     #         min_batch_size = min(x_batch.shape[0], y_batch.shape[0])
     #         x_batch = x_batch[:min_batch_size]
     #         y_batch = y_batch[:min_batch_size]
-        
+
     #     # Normalization [0, 1]
     #     x_batch = (x_batch + 1) / 2
     #     y_batch = (y_batch + 1) / 2
@@ -213,7 +230,7 @@ class Metrics:
 
         if num_samples > len(all_pairs):
             num_samples = len(all_pairs)
-        
+
         sampled_pairs = random.sample(all_pairs, num_samples)
 
         scores = []
@@ -222,9 +239,9 @@ class Metrics:
             y_img = y[j].unsqueeze(0)
             score = ssim(x_img, y_img, data_range=data_range, reduction='none')
             scores.append(score.item())
-            
+
         return torch.tensor(scores).mean()
-    
+
     def _ms_ssim_score(self, x, y, data_range=1.0, num_samples=1000):
         """
         Sample unique, random (x[i], y[j]) pairs from two sets and compute MS-SSIM.
@@ -252,7 +269,7 @@ class Metrics:
 
         if num_samples > len(all_pairs):
             num_samples = len(all_pairs)
-        
+
         sampled_pairs = random.sample(all_pairs, num_samples)
 
         scores = []
@@ -261,7 +278,7 @@ class Metrics:
             y_img = y[j].unsqueeze(0)
             score = multi_scale_ssim(x_img, y_img, data_range=data_range, reduction='none')
             scores.append(score.item())
-            
+
         return torch.tensor(scores).mean()
 
     def _fid_score(self, x, y, batch_size=32):
@@ -369,3 +386,18 @@ class DenseNet121FID(nn.Module):
             x = self.features(x)
             x = torch.flatten(x, 1)  # shape (N, 1024)
             return x
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

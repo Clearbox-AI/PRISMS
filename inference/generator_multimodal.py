@@ -44,10 +44,13 @@ def generate(cfg: DictConfig):
     # 1) ---------- load models ------------------------------------------- #
     vae = load_model(ModelType.VAE, cfg=cfg).to(device).eval()
 
+    from data.tabular_transforms import FittedTransforms
+    ft = FittedTransforms.load(Path("/home/PRISMS/data/computations/tab_ft.pkl"))
     diff = load_model(
-        ModelType.DIFFUSION,
-        cfg=cfg
-    ).to(device).eval()
+        model_type=ModelType.DIFFUSION,
+        cfg=cfg,
+        tab_transforms=ft
+    ).to(device)
 
     _, _ = resume_from_checkpoint(
         resume_dir=cfg.training.resume_checkpoint_dir,
@@ -56,22 +59,6 @@ def generate(cfg: DictConfig):
         device=device,
         use_ddp=cfg.distributed.use_ddp
     )
-
-    # 2) ── load the *training* StandardScaler ────────────────────────────────
-    stats_path = Path(cfg.data_synth.stats_file)
-    if not stats_path.is_file():
-        raise FileNotFoundError(
-            f"stats_file not found: {stats_path}\n"
-            "Set cfg.data_synth.stats_file to the JSON exported during training."
-        )
-
-    with open(stats_path, "r") as f:
-        stats = json.load(f)
-
-    scaler = StandardScaler()
-    scaler.mean_ = np.asarray(stats["tabular_scaler_mean_"], dtype=np.float32)
-    scaler.scale_ = np.asarray(stats["tabular_scaler_scale_"], dtype=np.float32)
-    scaler.n_features_in_ = len(scaler.mean_)
 
     # 2) ---------- prepare output dir ------------------------------------ #
     synth_base = Path(cfg.data_synth.data_dir)
@@ -87,22 +74,27 @@ def generate(cfg: DictConfig):
     for _ in tqdm(range(n_batches), desc="Generating", unit="batch"):
         cur_bs = min(bs, total - sample_idx)
 
+        half = cur_bs // 2
+        labels = torch.cat([
+            torch.zeros(half, dtype=torch.long),
+            torch.ones(cur_bs - half, dtype=torch.long)
+        ], dim=0)
+        perm = torch.randperm(cur_bs)
+        labels = labels[perm]
+        labels = labels.to(device, non_blocking=True)
+
         # 4.1) Sample *latent* image + tabular from diffusion
         lat_img, lat_tab = diff.sample(
             batch_size=cur_bs,
             guidance_scale=cfg.data_synth.guidance_scale,
             num_steps=cfg.data_synth.sample_steps,
+            labels=labels
         )
 
         # 4.2) Decode image latents back to pixel space
         recon_imgs = decode_latents(vae, lat_img, cfg.vae.scaling_factor)
 
-        # 4.3) Inverse‑transform tabular Z‑scores → original units
         lat_tab_np = lat_tab.cpu().numpy()  # shape (B, F)
-        tab_denorm = scaler.inverse_transform(lat_tab_np)
-
-        # OPTIONAL: restore sentinel *9999* (training converted >9999 → -1)
-        # tab_denorm = np.where(tab_denorm < 0, 9999, tab_denorm)
 
         # 4.4) Write each sample to its own folder
         for b in range(cur_bs):
@@ -115,7 +107,17 @@ def generate(cfg: DictConfig):
 
             # tabular (now de‑normalised!)
             with open(sd / "tabular.json", "w") as f:
-                json.dump(tab_denorm[b].tolist(), f)
+                json.dump(lat_tab_np[b].tolist(), f)
+
+            # labels
+            label_val = labels[b].item()
+            group_orig = "CN" if label_val == 0 else "AD"
+            metadata = {
+                "GROUP": group_orig,
+                "GROUP_ENC": label_val
+            }
+            with open(sd / "metadata.json", "w") as f:
+                json.dump(metadata, f)
 
             sample_idx += 1
 

@@ -17,14 +17,15 @@ data:
   do_image_normalize: true
   do_tabular_normalize: false
   do_augment: false
+  tf_train: true
   shuffle: false
   # debugging
   debug: true
 
   split:
-    enable: true       # set false to get 100 %-train behaviour
-    kwargs: # will be **expanded into train_test_split
-      test_size: 0.2   # val fraction (may also be int)
-      random_state: 42 # reproducible
+    enable: true
+    kwargs:
+      test_size: 0.2
+      random_state: 42
       shuffle: true
-      stratify: true   # honour class ratio; you may drop it for unsupervised cases
+      stratify: true

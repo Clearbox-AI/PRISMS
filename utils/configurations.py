@@ -1,7 +1,7 @@
 import os
 
 from omegaconf import DictConfig
-from typing import Dict, Any
+from typing import Dict, Any, Mapping
 
 
 def get_project_root():
@@ -49,23 +49,63 @@ def set_project_root():
 #                 break
 #     return cfg
 
-from omegaconf import DictConfig, OmegaConf
 from copy import deepcopy
+from omegaconf import open_dict
+from typing import Any, Mapping
+
+from omegaconf import DictConfig, OmegaConf
 
 
-def _merge_cfg(base: DictConfig, overrides: dict) -> DictConfig:
+def _merge_cfg(base: DictConfig, overrides: Mapping[str, Any]) -> dict:
     """
-    Return a **new** DictConfig obtained by applying the key/value pairs
-    in *overrides* on top of *base*.
+    Merge *overrides* (keys may be dotted paths) onto *base* and return
+    a **plain Python dict** that can contain arbitrary objects.
 
-    *Overrides* may contain **dot-paths** to reach nested fields, e.g.
-    `overrides={"encoder.num_layers": 8}`.
+    This avoids OmegaConf's type-checking on unions and its serialization
+    limits while keeping the convenience of dotted-key syntax.
     """
-    if not overrides:
-        return deepcopy(base)
+    # 1. Convert to a mutable plain dict (still nested)
+    cfg: dict = OmegaConf.to_container(base, resolve=False, enum_to_str=False)  # ➜ plain dict :contentReference[oaicite:2]{index=2}
+    cfg = deepcopy(cfg)  # preserve immutability of the original Hydra config
 
-    # Convert ``{"a.b": 1, "c":2}`` → OmegaConf.dotlist
-    dotlist = [f"{k}={v}" for k, v in overrides.items()]
-    user_cfg = OmegaConf.from_dotlist(dotlist)
-    merged = OmegaConf.merge(base, user_cfg)
-    return merged
+    # 2. Helper to set a dotted path inside a nested dict
+    def _set_nested(d: dict, dotted_key: str, value: Any) -> None:
+        parts = dotted_key.split(".")
+        for p in parts[:-1]:
+            d = d.setdefault(p, {})
+        d[parts[-1]] = value
+
+    # 3. Apply all overrides
+    for key, val in overrides.items():
+        _set_nested(cfg, key, val)
+
+    return cfg
+
+
+# def _merge_cfg(base: DictConfig, overrides: Mapping[str, Any]) -> DictConfig:
+#     """
+#     Merge *overrides* onto *base* and return an UN-typed DictConfig that:
+#       • still allows dot access (cfg.foo)
+#       • can contain arbitrary Python objects (allow_objects=True)
+#       • has **no** Union/type checks ⇒ avoids the 'Unions of containers'
+#         error that hit you before.
+#     """
+#     # 1️⃣ flatten base to a plain nested dict
+#     data = OmegaConf.to_container(
+#         base, resolve=False, enum_to_str=False
+#     )               # converts structured config → dict :contentReference[oaicite:0]{index=0}
+#     data = deepcopy(data)   # keep original immutable
+#
+#     # 2️⃣ apply dotted overrides
+#     def _set_nested(d: dict, dotted: str, value: Any):
+#         parts = dotted.split(".")
+#         for p in parts[:-1]:
+#             d = d.setdefault(p, {})
+#         d[parts[-1]] = value
+#
+#     for k, v in overrides.items():
+#         _set_nested(data, k, v)
+#
+#     # 3️⃣ re-wrap in an **unstructured** DictConfig
+#     cfg = OmegaConf.create(data, flags={"allow_objects": True})  # keeps objects verbatim :contentReference[oaicite:1]{index=1}
+#     return cfg

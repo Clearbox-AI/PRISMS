@@ -806,14 +806,10 @@ class MultiModalDiT(nn.Module):
         norm_eps=1e-6,
         depth_init=True,
         use_bias=True,
-
-        # ---------- NEW tabular settings ----------
-        num_numeric: int = 156,
-        categorical_cardinalities: Optional[List[int]] = [2],
-        num_classes: int = 2,  #  binary (0/1) + NULL
+        # tabular settings
+        num_tab_columns=157,
         tab_groups=10,
         out_table_features=10,
-
         # Patch mixer
         use_patch_mixer=True,
         patch_mixer_depth=2,
@@ -826,21 +822,6 @@ class MultiModalDiT(nn.Module):
         experts_every_n=2
     ):
         super().__init__()
-
-        # ────────────────────────────── label-conditioning ───────────────────────────
-        self.NULL_ID = num_classes  # = 2 for {0,1} + NULL = “drop”
-        self.class_emb = nn.Embedding(num_classes + 1, dim)
-        nn.init.trunc_normal_(self.class_emb.weight, std=0.02)
-        # ────────────────────────────── diagnosis head (for CB-FL) ───────────────────
-        self.diag_head = nn.Linear(dim, 1)  # simple logistic head on tab-CLS
-
-        if categorical_cardinalities is None:
-            categorical_cardinalities = []
-        self.num_numeric = num_numeric
-        self.cat_dims = categorical_cardinalities
-        # total tab width = numeric scalars + full one-hot vectors
-        self.num_tab_columns = self.num_numeric + sum(self.cat_dims)
-
         self.input_size = input_size
         self.patch_size = patch_size
         self.in_channels = in_channels
@@ -848,6 +829,7 @@ class MultiModalDiT(nn.Module):
         self.dim = dim
         self.use_patch_mixer = use_patch_mixer
         self.patch_mixer_dim = patch_mixer_dim
+        self.num_tab_columns = num_tab_columns
 
         # Patchify
         self.x_embedder = PatchEmbed(
@@ -863,7 +845,7 @@ class MultiModalDiT(nn.Module):
         self.t_embedder = TimestepEmbedder(hidden_size=dim, act_layer=nn.GELU)
 
         self.tab_transformer = TabTransformer(
-            num_cols=self.num_tab_columns,
+            num_cols=num_tab_columns,
             dim=dim,
             head_dim=head_dim,
             mlp_ratio=4.0,  # or whatever ratio you like
@@ -1001,7 +983,7 @@ class MultiModalDiT(nn.Module):
         self.final_tab = FinalTabHead(
             in_dim=dim,
             time_emb_dim=dim,
-            num_cols=self.num_tab_columns,
+            num_cols=157,
             act_layer=nn.GELU,
             norm_eps=norm_eps
         )
@@ -1029,10 +1011,8 @@ class MultiModalDiT(nn.Module):
     def forward(
             self,
             x_img: torch.Tensor,  # shape (B, in_channels, H, W)
-            x_tab: torch.Tensor,  # shape (B, num_tab_columns)
-            t_img: torch.Tensor,  # (B,)   timestep for image branch
-            t_tab: torch.Tensor,  # (B,)   timestep for tab branch
-            labels: Optional[torch.Tensor] = None,
+            t: torch.Tensor,  # shape (B,) timesteps
+            x_tab: torch.Tensor = None,  # shape (B, num_tab_columns) or None
             cfg: float = 1.0,  # guidance scale
             mask_ratio: float = 0.0
     ):
@@ -1042,91 +1022,82 @@ class MultiModalDiT(nn.Module):
         If cfg > 1.0 => do classifier-free guidance mixing (cond vs. uncond).
         """
 
-        # default to NULL (unconditional)
-        if labels is None:
-            labels = torch.full_like(t_img, self.NULL_ID, dtype=torch.long)
-
         if cfg == 1.0:
-            return self._forward_no_cfg(x_img, x_tab, t_img, t_tab, mask_ratio=mask_ratio, labels=labels)
+            return self.forward_without_cfg(x_img, t, x_tab, mask_ratio=mask_ratio)
         else:
-            return self._forward_with_cfg(x_img, x_tab, t_img, t_tab, cfg=cfg, mask_ratio=mask_ratio, labels=labels)
+            # Do the standard classifier-free guidance approach:
+            return self.forward_with_cfg(x_img, t, x_tab, cfg=cfg, mask_ratio=mask_ratio)
 
-    def _forward_no_cfg(
+    def forward_without_cfg(
             self,
             x_img: torch.Tensor,
-            x_tab: Optional[torch.Tensor],
-            t_img: torch.Tensor,
-            t_tab: torch.Tensor,
-            labels: Optional[torch.Tensor],
-            mask_ratio: float = 0.0,
+            t: torch.Tensor,
+            x_tab: torch.Tensor,
+            mask_ratio: float = 0.0
     ):
 
-        # -- timestep + class embeddings ------------------------------
-        label_emb = self.class_emb(labels)  # (B,D)
-        t_emb_img = self.t_embedder(t_img) + label_emb
-        t_emb_tab = self.t_embedder(t_tab) + label_emb
+        # T Embed
+        t_emb = self.t_embedder(t)
 
-        # -- patchify image -------------------------------------------
-        img_tokens = self.x_embedder(x_img) + self.pos_embed  # (B,T,D)
+        # 1) Patchify
+        img_tokens = self.x_embedder(x_img) + self.pos_embed
 
-        # -- tab transformer ------------------------------------------
-        tab_tokens, tab_cls = self.tab_transformer(x_tab) # (B,1+C,D)
+        # 2) tab branch -------------------------------------------------------
+        tab_tokens, tab_cls = self.tab_transformer(x_tab)
+        tab_kv = tab_tokens[:, 1:, :]  # FIX‑5 (exclude CLS)
+        cond_emb = t_emb + tab_cls
 
-        # pooled reps
-        tab_kv = tab_tokens[:, 1:, :]  # exclude CLS
-        img_pooled = img_tokens.mean(1)  # (B,D)
-        tab_pooled = tab_cls  # (B,D)
-
-        # -- optional ViT patch mixer ---------------------------------
         if self.vit_patch_mixer is not None:
-            img_small = self.patch_mixer_map_xin(img_tokens)
-            tab_small = self.tab_map_down(tab_kv)
-            cond_small = self.cond_map_down(t_emb_img + tab_cls)  # *image* t
-            img_small, img_cls_small = self.vit_patch_mixer(
-                img_small, tab_small, cond_small
+            # map image tokens to patch_mixer_dim
+            img_tokens_small = self.patch_mixer_map_xin(img_tokens)
+            tab_tokens_small = self.tab_map_down(tab_kv)
+            cond_emb_small = self.cond_map_down(cond_emb)
+
+            img_tokens_small, img_cls_small = self.vit_patch_mixer(
+                img_tokens_small, tab_tokens_small, cond_emb_small
             )
-            img_tokens = self.patch_mixer_map_xout(img_small)
-            img_pooled = self.patch_mixer_map_xout(img_cls_small)
+            img_tokens = self.patch_mixer_map_xout(img_tokens_small)
+            img_cls = self.patch_mixer_map_xout(img_cls_small)
+        else:
+            img_cls = img_tokens.mean(1)  # cheap pooled rep
 
+        tab_pooled = tab_cls
+        img_pooled = img_cls
 
-        # -- optional random masking ---------------------------------
+        # 4) Optional masking
         mask, ids_restore = None, None
-        if mask_ratio > 0:
+        if mask_ratio > 0.0:
             B, T_img, D = img_tokens.shape
             info = get_mask(B, T_img, mask_ratio, x_img.device)
             img_tokens = mask_out_token(img_tokens, info['ids_keep'])
             mask, ids_restore = info['mask'], info['ids_restore']
 
-        # -- main inter‑leaved blocks ---------------------------------
+        # inter‑leaved main blocks
         for blk_img, blk_tab in zip(self.blocks_imgtotab, self.blocks_tabtoimg):
-            img_tokens = blk_img(img_tokens, tab_kv, t_emb_img, tab_pooled)  # image t
-            tab_tokens = blk_tab(tab_tokens, img_tokens, t_emb_tab, img_pooled)  # tab t
+            img_tokens = blk_img(img_tokens, tab_tokens[:, 1:, :], t_emb, tab_pooled)
+            tab_tokens = blk_tab(tab_tokens, img_tokens, t_emb, img_pooled)
 
-        # -- final heads ----------------------------------------------
-        img_logits = self.final_img(img_tokens, t_emb_img)  # (B,T,patch^2*C)
-        if mask_ratio > 0 and ids_restore is not None:
+        img_logits = self.final_img(img_tokens, t_emb)
+        if (mask_ratio > 0.0) and (ids_restore is not None):
             img_logits = unmask_tokens(img_logits, ids_restore, self.mask_token)
-        img_sample = self.unpatchify(img_logits)  # (B,C,H,W)
+        img_out = self.unpatchify(img_logits)
 
-        tab_sample = self.final_tab(tab_tokens, t_emb_tab)  # (B,C_num)
-        diag_logits = self.diag_head(tab_pooled)  # (B,1)
+
+        tab_out = self.final_tab(tab_tokens, t_emb)
 
         return {
-            "image_sample": img_sample,
-            "tab_sample": tab_sample,
-            "diag_logits":  diag_logits.squeeze(-1),
+            "image_sample": img_out,  # (B, C, H, W)
+            "tab_sample": tab_out,
             "mask": mask
         }
 
-    def _forward_with_cfg(
+    def forward_with_cfg(
             self,
             x_img: torch.Tensor,
-            x_tab: Optional[torch.Tensor],
-            t_img: torch.Tensor,
-            t_tab: torch.Tensor,
-            labels: torch.Tensor,
+            t: torch.Tensor,
+            x_tab: torch.Tensor,
             cfg: float,
-            mask_ratio: float = 0.0,
+            mask_ratio: float = 0.0
     ):
         """
         Classifier-free guidance approach:
@@ -1137,47 +1108,35 @@ class MultiModalDiT(nn.Module):
         """
         B = x_img.shape[0]
 
-        # unconditional branch gets zeroed tabular input ----------------
+        # concat images => shape (2B, C, H, W)
+        x_img_cat = torch.cat([x_img, x_img], dim=0)
+
+        # concat tab => shape (2B, num_cols), second half = zeros
         zeros_tab = torch.zeros_like(x_tab)
-
-        # concat along batch dimension
-        x_img_cat = torch.cat([x_img, x_img], dim=0)  # (2B, C,H,W)
         tab_cat = torch.cat([x_tab, zeros_tab], dim=0)
-        t_img_cat = torch.cat([t_img, t_img], dim=0)  # (2B,)
-        t_tab_cat = torch.cat([t_tab, t_tab], dim=0)  # (2B,)
 
-        # -------------- build labels_cat only if still length B --------
-        if labels.shape[0] == B:
-            labels_cat = torch.cat(
-                [labels, labels.new_full(labels.shape, self.NULL_ID)],
-                0
-            )
-        else:  # already (2B,)
-            labels_cat = labels
+        # if t has shape (B, ), replicate => (2B, )
+        # if t.shape[0] != 1:
+        t = torch.cat([t, t], dim=0)  # (2B,)
 
-        # single pass ----------------------------------------------------
-        out_cat = self._forward_no_cfg(
+        # single pass with the expanded batch => (2B, ...)
+        out_cat = self.forward_without_cfg(
             x_img_cat,
+            t,
             tab_cat,
-            t_img_cat,
-            t_tab_cat,
-            labels=labels_cat,
             mask_ratio=mask_ratio
         )
+        # out_cat => dict with image_sample => (2B, C,H,W)
 
-        # split & mix ----------------------------------------------------
-        cond_img, uncond_img = out_cat["image_sample"].split(B, dim=0)
-        cond_tab, uncond_tab = out_cat["tab_sample"].split(B, dim=0)
-        cond_d, uncond_d = out_cat["diag_logits"].split(B, 0)
+        # split
+        image_sample_cat = out_cat['image_sample']  # (2B, C,H,W)
+        cond_img, uncond_img = torch.split(image_sample_cat, B, dim=0)
 
-        guided_img = uncond_img + cfg * (cond_img - uncond_img)
-        guided_tab = uncond_tab + cfg * (cond_tab - uncond_tab)
-        guided_d = uncond_d + cfg * (cond_d - uncond_d)
+        # combine => uncond + cfg*(cond - uncond)
+        final_img = uncond_img + cfg * (cond_img - uncond_img)
 
         return {
-            "image_sample": guided_img,
-            "tab_sample": guided_tab,
-            "diag_logits": guided_d,
+            "image_sample": final_img,
             "mask": None
         }
 
@@ -1213,6 +1172,30 @@ class MultiModalDiT(nn.Module):
         emb_w = get_1d_sin_cos(ww, embed_dim//2)
         return np.concatenate([emb_h, emb_w], axis=1)
 
+
+# def load_dit(cfg: DictConfig, **overrides: Any) -> nn.Module:
+#     """
+#     Load a MultiModalDiT model based on the provided configuration.
+#
+#     Args:
+#         cfg (DictConfig): The Hydra configuration object for the DiT model.
+#         **overrides (Any): Arbitrary keyword arguments used to override the default configuration.
+#
+#     Returns:
+#         nn.Module: The loaded MultiModalDiT model.
+#     """
+#     # Apply any overrides to the config before loading
+#     cfg = apply_overrides(cfg, overrides)
+#
+#     print("[INFO] Loading MultiModalDiT model with config:", cfg)
+#
+#     # Instantiate the MultiModalDiT model
+#     if "dit" in cfg:
+#         model = MultiModalDiT(**cfg.dit)
+#     else:
+#         model = MultiModalDiT(**cfg)
+#     print("[INFO] Loaded DiT")
+#     return model
 
 from utils.configurations import _merge_cfg
 def load_dit(cfg: DictConfig, **overrides: Any) -> nn.Module:
@@ -1254,21 +1237,21 @@ if __name__ == "__main__":
         num_experts=8,
         expert_capacity=2.0,
         experts_every_n=2,
-        num_numeric=156,
-        categorical_cardinalities=[2]
+        num_tab_columns=157,
+        tab_groups=10,
+        out_table_features=157
     )
 
     # Fake data
 
     N = 2
     x_img = torch.randn(N, 4, 32, 32)  # e.g. 2 images, 3 channels
-    tab = torch.randn(N, 158)
-    t_img = torch.randint(0, 1000, (N,))  # random timesteps
-    t_tab = torch.randint(0, 1000, (N,))  # random timesteps
+    tab = torch.randn(N, 157)
+    t = torch.randint(0, 1000, (N,))  # random timesteps
 
 
     # 3) Forward pass
-    res = model(x_img=x_img, x_tab=tab, t_img=t_img, t_tab=t_tab, mask_ratio=0.2, cfg=1)
+    res = model(x_img, t, tab, mask_ratio=0.2, cfg=1)
     print("img_out shape:", res["image_sample"].shape)  # (N, 3, 64, 64)
     print("tab_out shape:", res["tab_sample"].shape)  # (N, 174)
 

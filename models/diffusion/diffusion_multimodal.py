@@ -6,129 +6,72 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
-from typing import Optional, Tuple, List, Any, Dict
+from typing import Optional, Tuple
 from easydict import EasyDict
-from pathlib import Path
-import json
+from data.tabular_transforms import FittedTransforms, inverse_transform
+import math
 
 
-class StandardiseMixin:
-    """Adds μ/σ stats so every column is ~N(0,1)."""
-    def fit_stats(self, col: torch.Tensor):
-        self.register_buffer("mu",  col.mean())
-        self.register_buffer("sig", col.std().clamp_min(1e-9))
+def _log_sigma_to_t(sigma: torch.Tensor) -> torch.Tensor:
+    """EDM time‑embedding (log σ)/4, preserving shape (B,) or scalar."""
+    return sigma.log().div(4).float()
 
-    def _fwd_std(self, x): return (x - self.mu) / self.sig
-    def _inv_std(self, z): return z * self.sig + self.mu
+def _flatten_grads(grad_list):
+    return torch.cat([g.reshape(-1) for g in grad_list if g is not None])
 
-class ColumnTransform(nn.Module):
-    def forward(self, x: torch.Tensor) -> torch.Tensor: ...
-    def inverse(self, z: torch.Tensor) -> torch.Tensor: ...
-
-class IdentityTransform(StandardiseMixin, ColumnTransform):
-    def __init__(self, apply_std=True): super().__init__(); self.apply_std = apply_std
-    def forward(self, x): return self._fwd_std(x) if self.apply_std else x
-    def inverse(self, z): return self._inv_std(z) if self.apply_std else z
-
-class BoundedScalar(StandardiseMixin, ColumnTransform):
-    """lo ≤ x ≤ hi  ⇆ ℝ  via atanh / tanh."""
-    def __init__(self, lo, hi, apply_std=True):
-        super().__init__()
-        self.apply_std = apply_std
-        self.register_buffer("lo", torch.tensor(lo))
-        self.register_buffer("hi", torch.tensor(hi))
-        self.register_buffer("mid",   torch.tensor((hi + lo) / 2.0))
-        self.register_buffer("scale", torch.tensor((hi - lo) / 2.0))
-
-    def forward(self, x):
-        z = (x - self.mid) / self.scale
-        z = torch.atanh(z.clamp(-0.999, 0.999))
-        return self._fwd_std(z) if self.apply_std else z
-
-    def inverse(self, z):
-        z = self._inv_std(z) if self.apply_std else z
-        return self.mid + self.scale * torch.tanh(z)
-
-class NonNegative(StandardiseMixin, ColumnTransform):
-    def __init__(self, apply_std=True): super().__init__(); self.apply_std = apply_std
-    def forward(self, x):
-        z = torch.log1p(x)
-        return self._fwd_std(z) if self.apply_std else z
-    def inverse(self, z):
-        z = self._inv_std(z) if self.apply_std else z
-        return torch.expm1(z).clamp_min_(0.0)
-
-class NonPositive(StandardiseMixin, ColumnTransform):
-    def __init__(self, apply_std=True): super().__init__(); self.apply_std = apply_std
-    def forward(self, x):
-        z = torch.log1p(-x)
-        return self._fwd_std(z) if self.apply_std else z
-    def inverse(self, z):
-        z = self._inv_std(z) if self.apply_std else z
-        return -torch.expm1(z).clamp_min_(0.0)
-
-_SIGN2TF = {
-    "non-negative": NonNegative,
-    "non-positive": NonPositive,
-    "mixed": IdentityTransform,
-}
-
-def build_transforms_from_schema(path: str | Path) -> List[ColumnTransform]:
-    with open(path, "r") as f:
-        schema: List[Dict[str, Any]] = json.load(f)
-
-    tf: List[ColumnTransform] = []
-    for col in schema:
-        lo, hi = col.get("min"), col.get("max")
-        if lo is not None and hi is not None:
-            tf.append(BoundedScalar(lo, hi))
-        else:
-            tf_cls = _SIGN2TF.get(col.get("sign", "mixed").lower(), IdentityTransform)
-            tf.append(tf_cls())
-    return tf
-
-
-
-# helper
-def _make_t(batch, sigma_scalar):
-    """return (B,) float32 tensor with log(σ)/4 repeated B times"""
-    return (sigma_scalar.log() / 4).float().repeat(batch)
-
-
+# -----------------------------------------------------------------------------#
+# Main class
+# -----------------------------------------------------------------------------#
 class MultiModalDiffusion(nn.Module):
+    """
+    EDM‑Karras multimodal diffuser with
+    * TabDiff feature‑wise σ (optional)
+    * GradNorm dynamic loss scaling
+    * Dual timestamp support in the DiT backbone
+    """
+
     def __init__(
-        self,
-        dit: nn.Module,
-        num_tab_features: int,
-            tab_transforms: List[ColumnTransform],
-        *,
-        sigma_min: float, sigma_max: float, num_steps: int,
-        rho: int, P_mean: float, P_std: float,
-        S_churn: float, S_min: float, S_max: float, S_noise: float,
-        dtype: str = "bfloat16",
+            self,
+            *,
+            dit: nn.Module,
+            tab_transforms: FittedTransforms,
+            num_tab_features: int,
+            # EDM hyper‑params
+            sigma_min: float = 0.002,
+            sigma_max: float = 50.0,
+            num_steps: int = 40,
+            rho: int = 7,
+            P_mean: float = 0.0,
+            P_std: float = 1.0,
+            S_churn: float = 0.0,
+            S_min: float = 0.0,
+            S_max: float = float("inf"),
+            S_noise: float = 1.0,
+            # TabDiff
+            tab_sigma_max: float = 0.93,
+            feature_wise_sigma: bool = True,
+            lambda_sigma: float = 1e-5,
+            lambda_out: float = 1e-5,
+            freeze_alpha_at: int = 20_000,
+            # misc
+            class_counts: Tuple[int, int] = (1085, 307),  # (negatives, positives)
+            dtype: str = "bfloat16",
     ):
         super().__init__()
-        assert len(tab_transforms) == num_tab_features, "Mismatch transforms ↔ features"
-
         self.dit = dit
-        self.num_tab_features = num_tab_features
         self.dtype = dtype
-        self.tab_tf = nn.ModuleList(tab_transforms)
 
-        # self.edm = nn.ModuleDict({
-        #     "sigma_min": torch.tensor(sigma_min),
-        #     "sigma_max": torch.tensor(sigma_max),
-        #     "num_steps": torch.tensor(num_steps),
-        #     "rho": torch.tensor(rho),
-        #     "P_mean": torch.tensor(P_mean),
-        #     "P_std": torch.tensor(P_std),
-        #     "sigma_data": torch.tensor(0.9),
-        #     "S_churn": torch.tensor(S_churn),
-        #     "S_min": torch.tensor(S_min),
-        #     "S_max": torch.tensor(S_max),
-        #     "S_noise": torch.tensor(S_noise),
-        # })
+        # ---------------- tabular dims & transforms ------------------ #
+        self.ft = tab_transforms
+        cat_dim = (
+            sum(len(c) for c in tab_transforms.cat_encoder.categories_)
+            if tab_transforms.cat_features
+            else 0
+        )
+        self.tab_outdim = len(tab_transforms.num_features) + cat_dim
+        self.num_tab_features = num_tab_features  # raw count (before one‑hot)
 
+        # ---------------- EDM tracker -------------------------------- #
         self.edm = EasyDict(
             sigma_min=sigma_min,
             sigma_max=sigma_max,
@@ -143,222 +86,315 @@ class MultiModalDiffusion(nn.Module):
             S_noise=S_noise,
         )
 
-        self.randn_like = torch.randn_like
+        # ---------------- TabDiff setup ------------------------------ #
+        self.tab_sigma_max = float(tab_sigma_max)
+        self.feature_wise = bool(feature_wise_sigma)
+        self.lambda_sigma = lambda_sigma * num_tab_features / 250.0
+        self.lambda_out = lambda_out * num_tab_features / 250.0
+        self.freeze_alpha_at = freeze_alpha_at
 
-    # ------------------------------------------------------------------
-    # Helper – encode & decode
-    # ------------------------------------------------------------------
-    def encode_tab(self, x):
-        cols = [tf(x[:, i:i+1]) for i, tf in enumerate(self.tab_tf)]
-        return torch.cat(cols, dim=1)
+        if self.feature_wise:
+            # Initialise slightly below 1 per TabDiff §4.2
+            self.tab_alpha = nn.Parameter(torch.full((self.tab_outdim,), 0.8))
 
-    def decode_tab(self, z):
-        cols, cur = [], 0
-        for tf in self.tab_tf:
-            cols.append(tf.inverse(z[:, cur:cur + 1]));
-            cur += 1
-        x = torch.cat(cols, dim=1)
-        return self._validate(x)
+        # ---------------- GradNorm variables ------------------------- #
+        # single learnable log‑weight for the tab branch
+        self.log_w_tab = nn.Parameter(torch.zeros(()))
 
+        # iteration counter (for ramp‑up, freeze, etc.)
+        self.register_buffer("step_counter", torch.zeros((), dtype=torch.long))
 
-    # ---------------------------------------------------------------------
+        self.n_neg, self.n_pos = class_counts
+
+    # -----------------------------------------------------------------
     # Forward – training
-    # ---------------------------------------------------------------------
+    # -----------------------------------------------------------------
     def forward(
-        self,
-        x_img: torch.Tensor,         # latent image  (B,4,32,32)  already scaled
-        x_tab: torch.Tensor,         # standardised  (B,F)
-        mask_ratio: float = 0.,
+            self,
+            x_img: torch.Tensor,  # (B,4,32,32) latent‑space image
+            x_tab: torch.Tensor,  # (B,F)        standardised table
+            *,
+            mask_ratio: float = 0.0,
+            labels: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Returns
-        -------
-        total_loss, loss_img, loss_tab
-        """
 
-        # encode numeric columns to R
-        x_tab = self.encode_tab(x_tab)
+        # ------- 30 % label-dropout for CFG --------------------------------
+        if labels is not None:
+            drop = torch.rand_like(labels, dtype=torch.float) < 0.30
+            labels = labels.clone()
+            labels[drop] = self.dit.NULL_ID
 
-        device = x_img.device
-        B = x_img.size(0)
+        B, device = x_img.size(0), x_img.device
+        self.step_counter += 1
 
-        # 1) sample a *shared* σ  ~ logN(P_mean,P_std)
-        sigma = ((torch.randn(B, 1, device=device) * self.edm.P_std + self.edm.P_mean)
-                 .exp())  # (B,1)
-        σ_img = sigma.view(B, 1, 1, 1)
-        σ_tab = sigma.view(B, 1)
+        # (1) draw shared scalar σ  ~ LogNormal
+        sigma_scalar = (torch.randn(B, 1, device=device) * self.edm.P_std + self.edm.P_mean).exp()  # (B,1)
 
-        # 2) inject Gaussian noise (ε drawn *independently*)
-        ε_img = torch.randn_like(x_img) * σ_img
-        ε_tab = torch.randn_like(x_tab) * σ_tab
-        x_img_noisy = x_img + ε_img
-        x_tab_noisy = x_tab + ε_tab
+        # (2) branch‑specific injected σ
+        σ_img_inj = sigma_scalar.view(B, 1, 1, 1)  # (B,1,1,1)
+        σ_tab_base = sigma_scalar.clamp(max=self.tab_sigma_max)  # (B,1)
 
-        # 3) prepare EDM conditioning factors
-        c_in_img = 1. / (self.edm.sigma_data ** 2 + σ_img ** 2).sqrt()
-        c_in_tab = 1. / (self.edm.sigma_data ** 2 + σ_tab ** 2).sqrt()
-        c_noise = σ_tab.log() / 4.  # (B,1)   identical for img/tab
+        if self.feature_wise:
+            σ_tab_inj = σ_tab_base * self.tab_alpha.abs()  # (B,F)
+        else:
+            σ_tab_inj = σ_tab_base  # (B,1)
 
-        # 4) DiT forward ----------------------------------------------------
+        # (3) add Gaussian noise
+        x_img_noisy = x_img + torch.randn_like(x_img) * σ_img_inj
+        x_tab_noisy = x_tab + torch.randn_like(x_tab) * σ_tab_inj
+
+        # (4) EDM time‑embeddings (no clamping here)
+        t_img = _log_sigma_to_t(sigma_scalar.squeeze(1))  # (B,)
+        t_tab = t_img.clone()
+
+        # (5) backbone
         out = self.dit(
-            x_img=c_in_img * x_img_noisy,
-            x_tab=c_in_tab * x_tab_noisy,
-            t=c_noise.squeeze(-1),  # keep DiT sig‑shape agnostic
+            x_img=x_img_noisy * (1.0 / (self.edm.sigma_data ** 2 + σ_img_inj ** 2).sqrt()),
+            x_tab=x_tab_noisy * (1.0 / (self.edm.sigma_data ** 2 + σ_tab_inj ** 2).sqrt()),
+            t_img=t_img,
+            t_tab=t_tab,
+            labels=labels,
             mask_ratio=mask_ratio,
         )
-        F_img = out["image_sample"]
-        F_tab = out["tab_sample"]
+        F_img, F_tab, diag_logits = out["image_sample"], out["tab_sample"], out["diag_logits"]
 
-        # 5) Convert ε‑prediction → denoised estimate D(x)
-        D_img = self._to_D(x_img_noisy, σ_img, F_img)
-        D_tab = self._to_D(x_tab_noisy, σ_tab, F_tab)
+        # ----- (6) ε‑to‑D(x) mapping -------------------------------- #
+        D_img = self._to_D(x_img_noisy, σ_img_inj, F_img)
+        D_tab = self._to_D(x_tab_noisy, σ_tab_inj, F_tab)
 
-        # 6) Weighted EDM MSE – modality‑balanced
-        w = ((σ_tab ** 2 + self.edm.sigma_data ** 2) /
-             (σ_tab * self.edm.sigma_data) ** 2)  # (B,1)
+        # ----- (7) weighted MSE losses ------------------------------ #
+        w_img = ((σ_img_inj ** 2 + self.edm.sigma_data ** 2) / (σ_img_inj * self.edm.sigma_data) ** 2)
+        w_tab = ((σ_tab_inj ** 2 + self.edm.sigma_data ** 2) / (σ_tab_inj * self.edm.sigma_data) ** 2)
 
-        loss_img = (w.view(B, 1, 1, 1) * (D_img - x_img).square()).mean()
-        loss_tab = (w * (D_tab - x_tab).square()).mean() / self.num_tab_features
-        total_loss = loss_img + loss_tab
+        loss_img = (w_img * (D_img - x_img).square()).mean()
+        loss_tab_raw = (w_tab * (D_tab - x_tab).square()).mean()
 
-        return total_loss, loss_img, loss_tab
+        # ----- (8) TabDiff regularisers ----------------------------- #
+        reg = torch.tensor(0.0, device=device)
+
+        # ramp‑up schedule for λ’s (first 2k steps)
+        ramp = (self.step_counter.float() / 2_000.0).clamp(max=1.0) # linear 0→1 over 2k iters
+
+        if self.feature_wise and self.lambda_sigma > 0 and (self.step_counter < self.freeze_alpha_at):
+            reg = reg + ramp * self.lambda_sigma * (self.tab_alpha.abs() - 1.0).pow(2).mean()
+
+        if self.lambda_out > 0:
+            n_num = len(self.ft.num_features)
+            if n_num:
+                num_pred = D_tab[..., -n_num:]
+                mins = torch.tensor(
+                    [self.ft.num_specs[c].min for c in self.ft.num_features],
+                    device=device,
+                ).view(1, n_num)
+                maxs = torch.tensor(
+                    [self.ft.num_specs[c].max for c in self.ft.num_features],
+                    device=device,
+                ).view(1, n_num)
+                reg = reg + ramp * self.lambda_out * (
+                        torch.clamp(num_pred - maxs, min=0.0)
+                        + torch.clamp(mins - num_pred, min=0.0)
+                ).mean()
+
+        # ================== Class-Balanced Focal Loss =====================
+        beta = 0.999
+        gamma = 2.0
+        n_neg, n_pos = self.n_neg, self.n_pos  # from class_counts
+        eff_num = torch.tensor([n_neg, n_pos], device=device, dtype=torch.float)
+        eff_num = (1 - beta ** eff_num) / (1 - beta)
+        cb_w = (1 - beta) / eff_num  # length-2 tensor
+
+        # ----- mask-out unconditional rows (label == NULL_ID = 2) --------
+        valid = labels < self.dit.NULL_ID  # keep 0 & 1 only
+        if valid.any():
+            lbl = labels[valid]
+            logit = diag_logits[valid]
+
+            alpha = cb_w[lbl]  # safe index
+            prob = torch.sigmoid(logit)
+            focal = (alpha * (1 - prob).pow(gamma) *
+                     F.binary_cross_entropy_with_logits(
+                         logit, lbl.float(),
+                         reduction='none')
+                     ).mean()
+        else:
+            focal = torch.tensor(0., device=device)
+
+        # ----- (9) GradNorm weighting ------------------------------- #
+        loss_tab = torch.exp(self.log_w_tab) * loss_tab_raw
+        total = loss_img + loss_tab + focal + reg
+
+        # --- compute GradNorm penalty (α = 1.5) every step --------- #
+        grads_img = torch.autograd.grad(loss_img, list(self.dit.parameters()), retain_graph=True, allow_unused=True)
+        grads_tab = torch.autograd.grad(loss_tab, list(self.dit.parameters()), retain_graph=True, allow_unused=True)
+        G_img = _flatten_grads(grads_img).norm()
+        G_tab = _flatten_grads(grads_tab).norm()
+        grad_penalty = (G_img - G_tab.detach()).abs() ** 1.5
+        total = total + 0.01 * grad_penalty
+
+        # --- optionally freeze tab_alpha after warm‑up ------------- #
+        if self.feature_wise and self.step_counter == self.freeze_alpha_at:
+            self.tab_alpha.requires_grad_(False)
+
+        return total, loss_img.detach(), loss_tab_raw.detach()
 
     # ---------------------------------------------------------------------
     # Sampling (EDM tracker identical to training, but in a loop)
     # ---------------------------------------------------------------------
     @torch.no_grad()
     def sample(
-        self,
-        batch_size: int,
-        guidance_scale: float = 1.0,
-        num_steps: int = 40,
-        seed: Optional[int] = None,
-        return_latents: bool = False,
+            self,
+            batch_size: int,
+            *,
+            labels: Optional[torch.Tensor] = None,
+            guidance_scale: float = 1.0,
+            num_steps: int = 40,
+            seed: Optional[int] = None,
+            return_latents: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Generates one pair per batch element.
-        If `return_latents=False` the tabular output is de‑standardised and
-        the image latent is *not* decoded – leave decoding to the caller.
+        EDM Karras sampling with clamped tab noise injection.
+        Returns: image_latent (B,4,32,32), tab_tensor (B,F)
         """
+
         device = next(self.dit.parameters()).device
-        g = torch.Generator(device=device)
-        if seed is not None:
-            g.manual_seed(seed)
+        g = torch.Generator(device=device).manual_seed(seed or torch.seed())
 
-        # x(t=σ_max)       (shared init noise)
-        x_img = torch.randn((batch_size, 4, 32, 32), device=device, generator=g)
-        x_tab = torch.randn((batch_size, self.num_tab_features), device=device, generator=g)
+        if guidance_scale > 1.0:  # build 2B batch
+            labels_cond = (labels if labels is not None else torch.zeros(batch_size, dtype=torch.long, device=device))
+            labels_uncond = torch.full_like(labels_cond, self.dit.NULL_ID)
+            labels_cat = torch.cat([labels_cond, labels_uncond], 0)
+        else:
+            labels_cat = labels
 
-        cfg_fwd = partial(self.dit.forward, cfg=guidance_scale) \
-            if guidance_scale > 1. else self.dit.forward
-
-        # pre‑compute σ schedule
+        # -------- σ schedule (Karras) --------------------------- #
+        t_arr = torch.arange(num_steps, device=device, dtype=torch.float64)
+        sigmas = (self.edm.sigma_max ** (1 / self.edm.rho)
+                  + t_arr / (num_steps - 1)
+                  * (self.edm.sigma_min ** (1 / self.edm.rho) - self.edm.sigma_max ** (
+                            1 / self.edm.rho))) ** self.edm.rho
+        sigmas = torch.cat([sigmas, sigmas.new_zeros(1)])  # final 0
         N = num_steps
-        step = torch.arange(N, device=device, dtype=torch.float64)
-        σ = (self.edm.sigma_max ** (1 / self.edm.rho) +
-             step / (N - 1) * (self.edm.sigma_min ** (1 / self.edm.rho) -
-                               self.edm.sigma_max ** (1 / self.edm.rho))) ** self.edm.rho
-        σ = torch.cat([σ, σ.new_zeros(1)])  # append 0 for last update
 
-        # main loop ---------------------------------------------------------
-        x_img = x_img.double() * σ[0]
-        x_tab = x_tab.double() * σ[0]
+        # -------- initial noise --------------------------------- #
+        x_img = torch.randn(batch_size, 4, 32, 32, generator=g, device=device).double()
+        x_tab = torch.randn(batch_size, self.tab_outdim, generator=g, device=device).double()
 
-        for i, (σ_cur, σ_next) in enumerate(zip(σ[:-1], σ[1:])):
-            # optional σ‑churn  (turned off by default)
-            γ = min(self.edm.S_churn / N, np.sqrt(2) - 1) \
-                if self.edm.S_min <= σ_cur <= self.edm.S_max else 0.
-            σ_hat = σ_cur + γ * σ_cur
-            g_noise = self.edm.S_noise
-            x_img_hat = x_img + (σ_hat ** 2 - σ_cur ** 2).sqrt() * g_noise * torch.randn_like(x_img)
-            x_tab_hat = x_tab + (σ_hat ** 2 - σ_cur ** 2).sqrt() * g_noise * torch.randn_like(x_tab)
+        # -------- branch‑specific σ0 ----------------------------- #
+        σ0 = sigmas[0]
+        σ0_tab = torch.clamp(σ0, max=self.tab_sigma_max)
+        if self.feature_wise:
+            σ0_tab = σ0_tab * self.tab_alpha.abs()
+        σ0_tab = σ0_tab.unsqueeze(0).expand(batch_size, -1)
 
-            # predict ε (or v) and map to D(x)
-            t_hat_vec = _make_t(batch_size, σ_hat)
+        x_img *= σ0
+        x_tab *= σ0_tab
+
+        # -------- cfg wrapper ----------------------------------- #
+        cfg_fwd = (partial(self.dit.forward, cfg=guidance_scale) if guidance_scale > 1.0 else self.dit.forward)
+
+        # -------- main loop ------------------------------------- #
+        for i in range(N):
+            σ_i = sigmas[i].double()
+            σ_ip1 = sigmas[i + 1].double()
+
+            # σ_i_tab_inj = torch.clamp(σ_i, max=self.tab_sigma_max)
+
+            # σ for current step
+            σ_i_tab = torch.clamp(σ_i, max=self.tab_sigma_max)
+            if self.feature_wise:
+                σ_i_tab = σ_i_tab * self.tab_alpha.abs()
+            σ_i_tab = σ_i_tab.unsqueeze(0).expand(batch_size, -1)
+
+            # σ‑churn (Karras §C.2)
+            γ = (min(self.edm.S_churn / N, math.sqrt(2) - 1.0) if self.edm.S_min <= σ_i <= self.edm.S_max else 0.0)
+            σ_hat = σ_i + γ * σ_i  # always ≥ σ_i
+
+            σ_hat_tab = torch.clamp(σ_hat, max=self.tab_sigma_max)
+            if self.feature_wise:
+                σ_hat_tab = σ_hat_tab * self.tab_alpha.abs()
+            σ_hat_tab = σ_hat_tab.unsqueeze(0).expand(batch_size, -1)  # (B,F) or (B,1)
+
+            # noise perturbation
+            noise_img = torch.randn_like(x_img)
+            noise_tab = torch.randn_like(x_tab)
+            Δ_img = (σ_hat ** 2 - σ_i ** 2).sqrt()
+            Δ_tab = (σ_hat_tab ** 2 - σ_i_tab ** 2).clamp(min=0.0).sqrt()
+
+            x_img_hat = x_img + self.edm.S_noise * noise_img * Δ_img
+            x_tab_hat = x_tab + self.edm.S_noise * noise_tab * Δ_tab
+
+            # dual timesteps
+            t_img = _log_sigma_to_t(σ_hat).repeat(batch_size)
+            t_tab = t_img.clone()
+
+            # predict ε
             out = cfg_fwd(
-                x_img=x_img_hat.float(),
-                x_tab=x_tab_hat.float(),
-                t=t_hat_vec,
-                mask_ratio=0.,
+                x_img=x_img_hat.float() * (1.0 / (self.edm.sigma_data ** 2 + σ_hat ** 2).sqrt()),
+                x_tab=x_tab_hat.float() * (1.0 / (self.edm.sigma_data ** 2 + σ_hat_tab ** 2).sqrt()),
+                t_img=t_img,
+                t_tab=t_tab,
+                labels=labels_cat,
+                mask_ratio=0.0,
             )
+
             D_img = self._to_D(x_img_hat, σ_hat, out["image_sample"])
-            D_tab = self._to_D(x_tab_hat, σ_hat, out["tab_sample"])
+            D_tab = self._to_D(x_tab_hat, σ_hat_tab, out["tab_sample"])
+
+            d_img = (x_img_hat - D_img) / σ_hat
+            d_tab = (x_tab_hat - D_tab) / σ_hat_tab
 
             # Euler step
-            d_img = (x_img_hat - D_img) / σ_hat
-            d_tab = (x_tab_hat - D_tab) / σ_hat
-            x_img_next = x_img_hat + (σ_next - σ_hat) * d_img
-            x_tab_next = x_tab_hat + (σ_next - σ_hat) * d_tab
+            σ_ip1_tab = torch.clamp(σ_ip1, max=self.tab_sigma_max)
+            if self.feature_wise:
+                σ_ip1_tab = σ_ip1_tab * self.tab_alpha.abs()
+            σ_ip1_tab = σ_ip1_tab.unsqueeze(0).expand(batch_size, -1)
 
-            # 2nd‑order corrector (disabled at final step)
+            x_img_next = x_img_hat + (σ_ip1 - σ_hat) * d_img
+            x_tab_next = x_tab_hat + (σ_ip1_tab - σ_hat_tab) * d_tab
+
+            # 2nd order corrector (disabled at final step)
             if i < N - 1:
-                t_next_vec = _make_t(batch_size, σ_next)
-                out = cfg_fwd(
-                    x_img=x_img_next.float(),
-                    x_tab=x_tab_next.float(),
-                    t=t_next_vec,
-                    mask_ratio=0.,
+                t_img_2 = _log_sigma_to_t(σ_ip1).repeat(batch_size)
+                t_tab_2 = t_img_2.clone()
+
+                out2 = cfg_fwd(
+                    x_img=x_img_next.float() * (1.0 / (self.edm.sigma_data ** 2 + σ_ip1 ** 2).sqrt()),
+                    x_tab=x_tab_next.float() * (1.0 / (self.edm.sigma_data ** 2 + σ_ip1_tab ** 2).sqrt()),
+                    t_img=t_img_2,
+                    t_tab=t_tab_2,
+                    labels=labels_cat,
+                    mask_ratio=0.0,
                 )
-                D_img_prime = self._to_D(x_img_next, σ_next, out["image_sample"])
-                D_tab_prime = self._to_D(x_tab_next, σ_next, out["tab_sample"])
-                d_img_prime = (x_img_next - D_img_prime) / σ_next
-                d_tab_prime = (x_tab_next - D_tab_prime) / σ_next
-                x_img_next = x_img_hat + (σ_next - σ_hat) * 0.5 * (d_img + d_img_prime)
-                x_tab_next = x_tab_hat + (σ_next - σ_hat) * 0.5 * (d_tab + d_tab_prime)
+                D_img_2 = self._to_D(x_img_next, σ_ip1, out2["image_sample"])
+                D_tab_2 = self._to_D(x_tab_next, σ_ip1_tab, out2["tab_sample"])
+
+                d_img_2 = (x_img_next - D_img_2) / σ_ip1
+                d_tab_2 = (x_tab_next - D_tab_2) / σ_ip1_tab
+
+                x_img_next = x_img_hat + 0.5 * (σ_ip1 - σ_hat) * (d_img + d_img_2)
+                x_tab_next = x_tab_hat + 0.5 * (σ_ip1_tab - σ_hat_tab) * (d_tab + d_tab_2)
 
             x_img, x_tab = x_img_next, x_tab_next
 
-        x_img = x_img.float()
-        x_tab = x_tab.float()
+        # back to fp32
+        x_img, x_tab = x_img.float(), x_tab.float()
 
         if return_latents:
-            return x_img.float(), x_tab.float()
+            return x_img, x_tab
 
-        # -------- post‑process to original spaces --------------------------
-        # x_tab = x_tab * self.tab_scaler_std               # un‑standardise
-        # leave x_img as latent; caller can VAE.decode(...)
-        # return x_img / self.img_latent_scale, x_tab
-        tab_dec = self.decode_tab(x_tab.float())
-        return x_img.float(), tab_dec
+        # inverse transform the table branch
+        tab_np = inverse_transform(self.ft, x_tab.cpu().numpy())
+        return x_img, torch.from_numpy(tab_np.astype(np.float32)).to(device)
 
-    # ---------------------------------------------------------------------
-    # Helpers
-    # ---------------------------------------------------------------------
-    def _to_D(self, x_noisy, σ, F_x):
-        """EDM skip‑connection formula – works for scalar or tensor σ."""
-        c_skip = self.edm.sigma_data**2 / (σ**2 + self.edm.sigma_data**2)
-        c_out  = σ * self.edm.sigma_data / (σ**2 + self.edm.sigma_data**2).sqrt()
+    # ------------------- helpers ----------------------------------------- #
+    def _to_D(self, x_noisy: torch.Tensor, σ: torch.Tensor, F_x: torch.Tensor):
+        c_skip = self.edm.sigma_data ** 2 / (σ ** 2 + self.edm.sigma_data ** 2)
+        c_out = σ * self.edm.sigma_data / (σ ** 2 + self.edm.sigma_data ** 2).sqrt()
         return c_skip * x_noisy + c_out * F_x
 
-    def _validate(self, x_tab: torch.Tensor) -> torch.Tensor:
-        """Clamp any residual out‑of‑range values (Layer 3)."""
-        for i, tf in enumerate(self.tab_tf):
-            if isinstance(tf, BoundedScalar):
-                x_tab[:, i].clamp_(tf.lo.item(), tf.hi.item())
-            elif isinstance(tf, NonNegative):
-                x_tab[:, i].clamp_min_(0.0)
-        return x_tab
-
-
-
-# def load_diffusion(cfg: DictConfig, dit_model: nn.Module, tmp_param: Any = None, **overrides: Any) -> nn.Module:
-#     """
-#     Load a MultiModalDiffusion model from config, injecting a pre-loaded DiT.
-#     """
-#     from utils.configurations import apply_overrides
-#     cfg = apply_overrides(cfg, overrides)
-#     print("[INFO] Loading Diffusion model with config:", cfg)
-#
-#     if "diffusion" in cfg:
-#         diffusion_model = MultiModalDiffusion(dit=dit_model, **cfg.diffusion)
-#     else:
-#         diffusion_model = MultiModalDiffusion(dit=dit_model, **cfg)
-#
-#     print("[INFO] Loaded Diffusion Model")
-#     return diffusion_model
 
 from utils.configurations import _merge_cfg
-def load_diffusion(cfg: DictConfig, dit_model, tab_transforms, **overrides):
+def load_diffusion(cfg: DictConfig, dit_model, **overrides):
     """
     Instantiate ``MultiModalDiffusion`` with an already-built *dit_model*.
 
@@ -366,7 +402,7 @@ def load_diffusion(cfg: DictConfig, dit_model, tab_transforms, **overrides):
     loaders.
     """
     final_cfg = _merge_cfg(cfg, overrides)
-    diffusion_model = MultiModalDiffusion(dit=dit_model, tab_transforms=tab_transforms, **final_cfg)
+    diffusion_model = MultiModalDiffusion(dit=dit_model, **final_cfg)
     return diffusion_model
 
 

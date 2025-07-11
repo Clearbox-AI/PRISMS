@@ -30,21 +30,25 @@ class NaccSynthDataset(Dataset):
         self.data_dir = Path(data_dir)
         self.debug = debug
 
-        # subdirs = sorted(
-        #     p for p in self.data_dir.iterdir() if p.is_dir()
-        # )
-        # if not subdirs:
-        #     raise ValueError(f"No sub-directories found in {self.data_dir!r}")
-        # self.data_dir = subdirs[-1]
-        #
-        # # enumerate sample folders
-        # self.sample_dirs: List[Path] = sorted(
-        #     p for p in self.data_dir.iterdir() if p.is_dir()
-        # )
         subdirs = [p for p in self.data_dir.iterdir() if p.is_dir()]
         self.sample_dirs: List[Path] = subdirs
         if not self.sample_dirs:
             raise ValueError(f"No samples found in {self.data_dir}")
+
+        # preload GROUP labels from metadata.json
+        self.labels: List[Union[int, None]] = []
+        self.labels_enc: List[Union[int, None]] = []
+        for pdir in self.sample_dirs:
+            meta_path = pdir / "metadata.json"
+            if meta_path.is_file():
+                with open(meta_path, "r") as mf:
+                    meta = json.load(mf)
+                # use GROUP numeric value; default to None if missing
+                self.labels.append(meta.get("GROUP", "CN"))
+                self.labels_enc.append(meta.get("GROUP_ENC", 0))
+            else:
+                self.labels.append(None)
+                self.labels_enc.append(None)
 
     def __len__(self) -> int:
         return len(self.sample_dirs)
@@ -77,6 +81,13 @@ class NaccSynthDataset(Dataset):
                        dtype=np.float32)
         tab_tensor = torch.from_numpy(tab)
 
+        # ---------- metadata ------------------------------------- #
+        meta_path = sample_dir / "metadata.json"
+        if not meta_path.is_file():
+            raise FileNotFoundError(meta_path)
+        with open(meta_path, "r") as f:
+            metadata = json.load(f)
+
         # ---------- optional first-sample debug ------------------ #
         if self.debug and not type(self)._debug_shown_global:
             self._show_debug(img_tensor)
@@ -85,6 +96,7 @@ class NaccSynthDataset(Dataset):
         return {
             "image":   img_tensor,          # torch.float32  (C,H,W)
             "tabular": tab_tensor,          # torch.float32  (F,)
+            "metadata": metadata,  # dict with GROUP and GROUP_ORIG
             "dir":     str(sample_dir),
         }
 
