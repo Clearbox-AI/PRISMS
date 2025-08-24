@@ -36,6 +36,13 @@ dit:
   expert_capacity: 2.0
   experts_every_n: 3 #2
 
+  # tried 12/07
+  #  norm_type: "np_layernorm"      # bias-free LN
+  #cat_mode: "logits"             # {onehot|logits|bits}
+  #gumbel_tau0: 1.0               # initial τ for G-Softmax
+  #noise_select: true             # 2.3
+  #self_condition: true           # 2.1
+
 
 
 data:
@@ -59,10 +66,10 @@ data:
 data_synth:
   data_dir: "/mnt/storage/nacc_sub/generated" #"/mnt/storage/nacc_sub/generated"
   batch_size: 8
-  save_label: "v2"
+  save_label: "v4"
   num_samples: 1000
   sample_steps: 30
-  guidance_scale: 1.0
+  guidance_scale: 2.5
   debug: false
 
 #diffusion:
@@ -84,19 +91,20 @@ training:
 
   # hyperparameters
   epochs: 6000
-  save_model_interval: 5000
+  save_model_interval: 2500
   lr: 1.5e-4 #2e-4
   # sampling
   sample_conditioning: 1.0
   sample_steps: 30
   sample_latents_path: ""
-  sample_interval: 200
+  sample_interval: 500
+
   # logging/saving
-  log_interval: 10
+  log_interval: 200
   base_save_path: "/mnt/storage/nacc_sub/dit"
-  save_label: "test_cfg_label" # if you need to add a certain label to the model output path, other than the date
-  resume_training: false
-  resume_checkpoint_dir: "/mnt/storage/nacc_sub/dit/2025-06-16_14-28-50_test_cfg_label"
+  save_label: "refine_freeze"
+  resume_training: true
+  resume_checkpoint_dir: "/mnt/storage/nacc_sub/dit/2025-07-22_20-27-47_refine_freeze"
 
 distributed:
   use_ddp: true

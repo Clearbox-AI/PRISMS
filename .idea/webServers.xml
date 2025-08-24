@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="35fef362-3737-42a3-9ce9-b50547079e6b" name="prisms_us">
+        <fileTransfer accessType="SFTP" host="35.194.18.151" port="22" sshConfigId="256c61b9-1c3e-46b7-a41c-3ab9e09a2519" sshConfig="giovanni@35.194.18.151:22 key" keyPair="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

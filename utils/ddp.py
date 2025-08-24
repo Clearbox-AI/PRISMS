@@ -3,6 +3,7 @@ import torch
 import torch.distributed as dist
 
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim.swa_utils import AveragedModel
 from omegaconf import DictConfig
 
 def is_main_process() -> bool:
@@ -13,17 +14,15 @@ def is_main_process() -> bool:
     return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
 
 
-def strip_ddp_prefix(state_dict, keyword):
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        if k.startswith(f"{keyword}."):
-            new_k = k[len(f"{keyword}."):]
-        elif k.startswith(f"{keyword}."):
-            new_k = k[len(f"{keyword}."):]
-        else:
-            new_k = k
-        new_state_dict[new_k] = v
-    return new_state_dict
+def strip_ddp_prefix(state_dict, keyword: str = "module"):
+    """
+    Remove a single leading '<keyword>.' from every key in *state_dict*.
+    Works for checkpoints saved under DDP as well as non-DDP models.
+    """
+    return {
+        (k[len(keyword) + 1 :] if k.startswith(f"{keyword}.") else k): v
+        for k, v in state_dict.items()
+    }
 
 
 def setup_distributed(cfg: DictConfig) -> int:
@@ -48,15 +47,19 @@ def cleanup_distributed():
     dist.destroy_process_group()
 
 
+def _unwrap(model):
+    """Recursively peel {DDP, EMAWrapper/AveragedModel} until custom methods show up."""
+    while True:
+        if hasattr(model, "sample"):
+            return model                               # found the real net
+        if isinstance(model, (DDP, AveragedModel)):
+            model = model.module                       # step down one layer
+        elif hasattr(model, "module"):                 # generic safety-net
+            model = model.module
+        else:
+            break
+    raise AttributeError(f"{type(model)} does not expose `.sample()`")
+
+
 def ddp_sample(model, *args, **kwargs):
-    """
-    Calls 'sample' on the underlying model if wrapped in DDP.
-    """
-    if isinstance(model, DDP):
-        return model.module.generate(*args, **kwargs)
-    else:
-        return model.generate(*args, **kwargs)
-    # if isinstance(model, DDP):
-    #     return model.module._sample_edm(*args, **kwargs)
-    # else:
-    #     return model._sample_edm(*args, **kwargs)
+    return _unwrap(model).sample(*args, **kwargs)

@@ -128,10 +128,8 @@ def train_model(cfg: DictConfig) -> None:
     vae.requires_grad_(False).eval()  # keep VAE frozen
 
     # 4) Build the multi-modal diffusion model
-    from data.tabular_transforms import FittedTransforms, forward_transform, inverse_transform
-    import numpy as np
+    from data.tabular_transforms import FittedTransforms
     ft = FittedTransforms.load(Path("/home/PRISMS/data/computations/tab_ft.pkl"))
-
     mm_diff_model = load_model(
         model_type=ModelType.DIFFUSION,
         cfg=cfg,
@@ -155,8 +153,7 @@ def train_model(cfg: DictConfig) -> None:
     )
 
     # 6) Create optimizer
-    # optimizer = optim.AdamW(mm_diff_model.parameters(), lr=3e-4, betas=(0.9, 0.999), weight_decay=0.0)
-    optimizer = optim.AdamW(param_groups(mm_diff_model), lr=3e-4, betas=(0.9, 0.999), eps=1e-8)
+    optimizer = optim.AdamW(mm_diff_model.parameters(), lr=cfg.training.lr)
 
     # 7) Optionally resume training from checkpoint
     start_epoch = 0
@@ -171,36 +168,40 @@ def train_model(cfg: DictConfig) -> None:
         )
 
     # 8) Training loop
-    for epoch in range(start_epoch, cfg.training.epochs):
-        # If using a DistributedSampler, set epoch for shuffling
-        if cfg.distributed.use_ddp and hasattr(train_loader.sampler, 'set_epoch'):
-            train_loader.sampler.set_epoch(epoch)
+    try:
+        for epoch in range(start_epoch, cfg.training.epochs):
+            # If using a DistributedSampler, set epoch for shuffling
+            if cfg.distributed.use_ddp and hasattr(train_loader.sampler, 'set_epoch'):
+                train_loader.sampler.set_epoch(epoch)
 
-        global_step, last_loss = train_one_epoch(
-            epoch=epoch, model=mm_diff_model, optimizer=optimizer, train_loader=train_loader,
-            cfg=cfg, vae=vae, global_step=global_step, base_save_path=main_save_dir, device=device,
-        )
+            global_step, last_loss = train_one_epoch(
+                epoch=epoch, model=mm_diff_model, optimizer=optimizer, train_loader=train_loader,
+                cfg=cfg, vae=vae, global_step=global_step, base_save_path=main_save_dir, device=device,
+            )
 
-    # 9) Final checkpoint (only rank-0)
-    if cfg.training.save_model_interval is not None and is_main_process():
-        save_checkpoint(
-            ckpt_dir=main_save_dir,
-            ckpt_name=f"checkpoint_step_{global_step}_final.pt",
-            model=mm_diff_model,
-            optimizer=optimizer,
-            epoch=cfg.training.epochs,
-            step=global_step,
-            last_loss=last_loss,
-            use_ddp=cfg.distributed.use_ddp
-        )
+        # 9) Final checkpoint (only rank-0)
+        if cfg.training.save_model_interval is not None and is_main_process():
+            save_checkpoint(
+                ckpt_dir=main_save_dir,
+                ckpt_name=f"checkpoint_step_{global_step}_final.pt",
+                model=mm_diff_model,
+                optimizer=optimizer,
+                epoch=cfg.training.epochs,
+                step=global_step,
+                last_loss=last_loss,
+                use_ddp=cfg.distributed.use_ddp
+            )
 
-    # 10) Cleanup
-    if cfg.distributed.use_ddp:
-        cleanup_distributed()
+        # 10) Cleanup
+        if cfg.distributed.use_ddp:
+            cleanup_distributed()
 
-    if is_main_process():
-        print("Training complete!")
-    monitor.close()
+        if is_main_process():
+            print("Training complete!")
+    except RuntimeError as e:
+        print(f"Training stopped: {e}")
+    finally:
+        monitor.close()
 
 def ddp_sample(model, *args, **kwargs):
     if isinstance(model, DDP):
@@ -309,19 +310,6 @@ class FlowMonitor:
 
     def close(self):
         self.log_file.close()
-
-def param_groups(model):
-    decay, no_decay = [], []
-    for n,p in model.named_parameters():
-        if not p.requires_grad: continue
-        if isinstance(p, nn.LayerNorm) or 'bias' in n:
-            no_decay.append(p)
-        else:
-            decay.append(p)
-    return [
-        {'params': decay, 'weight_decay': 1e-2},
-        {'params': no_decay, 'weight_decay': 0.0},
-    ]
 
 if __name__ == "__main__":
 

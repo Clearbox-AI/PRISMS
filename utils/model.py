@@ -10,24 +10,30 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 # -----------------------------------------------------------------------------
 
 def _ema_to_dict(ema_obj) -> dict:
-    """Pack the minimal information required to restore an EMA instance."""
-
-    shadow_cpu: List[torch.Tensor] = [p.detach().cpu() for p in ema_obj.shadow_params]
+    """
+    Pack only what is needed to restore an AveragedModel-based EMA:
+      * the averaged parameters (state_dict)
+      * number of updates so far (n_averaged)
+      * decay hyper-param
+    """
     return {
-        "shadow_params": shadow_cpu,
-        "num_updates": ema_obj.num_updates,
-        "decay": ema_obj.decay,
-        "update_after_step": ema_obj.update_after_step,
-        "update_every": ema_obj.update_every,
+        "state_dict": ema_obj.module.state_dict(),          # averaged weights
+        "num_updates": int(getattr(ema_obj, "n_averaged", 0)),
+        "decay": float(getattr(ema_obj, "decay", 0.0)),
     }
 
 def _dict_to_ema(state: dict, ema_obj, device: torch.device):
-    """Load the serialized state **in‑place** into ``ema_obj`` (same class)."""
-
-    for p_shadow, p_saved in zip(ema_obj.shadow_params, state["shadow_params"]):
-        p_shadow.data.copy_(p_saved.to(device))
-
-    ema_obj.num_updates = state.get("num_updates", 0)
+    """
+    Load the serialized EMA **in-place** into `ema_obj`.
+    """
+    # 1) weights
+    ema_obj.module.load_state_dict(state["state_dict"])
+    # 2) update counter
+    if "num_updates" in state:
+        ema_obj.n_averaged.copy_(torch.tensor(state["num_updates"], device=device))
+    # 3) decay hyper-param
+    if "decay" in state:
+        ema_obj.decay = state["decay"]
 
 def load_checkpoint(model: torch.nn.Module, checkpoint_path: str, device: str) -> None:
     """

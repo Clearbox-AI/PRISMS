@@ -10,8 +10,6 @@ from typing import Optional, Tuple
 from easydict import EasyDict
 from data.tabular_transforms import FittedTransforms, inverse_transform
 import math
-from models.dit.dit_multimodal import FeedForwardECMoe
-import torch.distributed as dist
 
 
 def _log_sigma_to_t(sigma: torch.Tensor) -> torch.Tensor:
@@ -58,11 +56,9 @@ class MultiModalDiffusion(nn.Module):
             # misc
             class_counts: Tuple[int, int] = (1085, 307),  # (negatives, positives)
             dtype: str = "bfloat16",
-            noise_select = True
     ):
         super().__init__()
         self.dit = dit
-
         self.dtype = dtype
 
         # ---------------- tabular dims & transforms ------------------ #
@@ -98,7 +94,7 @@ class MultiModalDiffusion(nn.Module):
         self.freeze_alpha_at = freeze_alpha_at
 
         if self.feature_wise:
-            # will be overwritten on the first forward pass
+            # Initialise slightly below 1 per TabDiff §4.2
             self.tab_alpha = nn.Parameter(torch.full((self.tab_outdim,), 0.8))
 
         # ---------------- GradNorm variables ------------------------- #
@@ -109,14 +105,6 @@ class MultiModalDiffusion(nn.Module):
         self.register_buffer("step_counter", torch.zeros((), dtype=torch.long))
 
         self.n_neg, self.n_pos = class_counts
-
-        # --- broadcast-safety flags ------------------------------------------- #
-        self._alpha_init_done = False  # will be set after broadcast
-
-        # ── wire global step counter to each MoE mlp ────────────────────────────
-        for m in self.dit.modules():
-            if isinstance(m, FeedForwardECMoe):
-                m.step_counter = self.step_counter
 
     # -----------------------------------------------------------------
     # Forward – training
@@ -146,23 +134,10 @@ class MultiModalDiffusion(nn.Module):
         σ_img_inj = sigma_scalar.view(B, 1, 1, 1)  # (B,1,1,1)
         σ_tab_base = sigma_scalar.clamp(max=self.tab_sigma_max)  # (B,1)
 
-        # ---------- ONE-TIME, ALL-RANK initialisation & broadcast -------------- #
-        if self.feature_wise and not self._alpha_init_done:
-            with torch.no_grad():
-                # compute per-feature std-ratio on *this* mini-batch
-                std_ratio = x_tab.std(0) / (x_tab.std() + 1e-8)
-                std_ratio = std_ratio.clamp(min=1e-3)
-                self.tab_alpha.data.copy_(std_ratio)
-
-                # ---- synchronise so every rank sees identical weights -------- #
-
-                if dist.is_available() and dist.is_initialized():
-                    dist.broadcast(self.tab_alpha.data, src=0)
-            self._alpha_init_done = True
-            σ_tab_inj = (σ_tab_base * self.tab_alpha.abs() if self.feature_wise else σ_tab_base)
+        if self.feature_wise:
+            σ_tab_inj = σ_tab_base * self.tab_alpha.abs()  # (B,F)
         else:
             σ_tab_inj = σ_tab_base  # (B,1)
-
 
         # (3) add Gaussian noise
         x_img_noisy = x_img + torch.randn_like(x_img) * σ_img_inj
@@ -172,26 +147,6 @@ class MultiModalDiffusion(nn.Module):
         t_img = _log_sigma_to_t(sigma_scalar.squeeze(1))  # (B,)
         t_tab = t_img.clone()
 
-        # SELF-CONDITIONING (50 % of mini-batches)                   #
-        if torch.rand((), device=device) < 0.5:
-            with torch.no_grad():  # stop-gradient teacher pass
-                sc_out = self.dit(  # first (teacher) call
-                    x_img = x_img_noisy * (1.0 / (self.edm.sigma_data ** 2 + σ_img_inj ** 2).sqrt()),
-                    x_tab = x_tab_noisy * (1.0 / (self.edm.sigma_data ** 2 + σ_tab_inj ** 2).sqrt()),
-                    t_img = t_img,
-                    t_tab = t_tab,
-                    labels = labels,
-                    mask_ratio = mask_ratio,
-                    self_cond_img = None,
-                    self_cond_tab = None,
-                    cfg = 1.0  # always unconditional here
-                )
-            self_cond_img = sc_out["image_sample"].detach()
-            self_cond_tab = sc_out["tab_sample"].detach()
-        else:
-            self_cond_img = None
-            self_cond_tab = None
-
         # (5) backbone
         out = self.dit(
             x_img=x_img_noisy * (1.0 / (self.edm.sigma_data ** 2 + σ_img_inj ** 2).sqrt()),
@@ -200,8 +155,6 @@ class MultiModalDiffusion(nn.Module):
             t_tab=t_tab,
             labels=labels,
             mask_ratio=mask_ratio,
-            self_cond_img = self_cond_img,
-            self_cond_tab = self_cond_tab,
         )
         F_img, F_tab, diag_logits = out["image_sample"], out["tab_sample"], out["diag_logits"]
 
@@ -229,14 +182,18 @@ class MultiModalDiffusion(nn.Module):
             n_num = len(self.ft.num_features)
             if n_num:
                 num_pred = D_tab[..., -n_num:]
-                mins = torch.tensor([self.ft.num_specs[c].min for c in self.ft.num_features], device=device).view(1, n_num)
-                maxs = torch.tensor([self.ft.num_specs[c].max for c in self.ft.num_features], device=device).view(1, n_num)
-                # overflow = torch.clamp(num_pred - maxs, min=0.)
-                # underflow = torch.clamp(mins - num_pred, min=0.)
-                # reg = reg + ramp * self.lambda_out * (overflow + underflow).mean()
-                v = num_pred
-                reg_range = ((torch.relu(v - maxs)) ** 2 + (torch.relu(mins - v)) ** 2).mean()
-                reg = reg + ramp * self.lambda_out * reg_range
+                mins = torch.tensor(
+                    [self.ft.num_specs[c].min for c in self.ft.num_features],
+                    device=device,
+                ).view(1, n_num)
+                maxs = torch.tensor(
+                    [self.ft.num_specs[c].max for c in self.ft.num_features],
+                    device=device,
+                ).view(1, n_num)
+                reg = reg + ramp * self.lambda_out * (
+                        torch.clamp(num_pred - maxs, min=0.0)
+                        + torch.clamp(mins - num_pred, min=0.0)
+                ).mean()
 
         # ================== Class-Balanced Focal Loss =====================
         beta = 0.999
@@ -262,7 +219,6 @@ class MultiModalDiffusion(nn.Module):
         else:
             focal = torch.tensor(0., device=device)
 
-
         # ----- (9) GradNorm weighting ------------------------------- #
         loss_tab = torch.exp(self.log_w_tab) * loss_tab_raw
         total = loss_img + loss_tab + focal + reg
@@ -272,7 +228,7 @@ class MultiModalDiffusion(nn.Module):
         grads_tab = torch.autograd.grad(loss_tab, list(self.dit.parameters()), retain_graph=True, allow_unused=True)
         G_img = _flatten_grads(grads_img).norm()
         G_tab = _flatten_grads(grads_tab).norm()
-        grad_penalty = (G_img - G_tab.detach()).abs() ** 0.5
+        grad_penalty = (G_img - G_tab.detach()).abs() ** 1.5
         total = total + 0.01 * grad_penalty
 
         # --- optionally freeze tab_alpha after warm‑up ------------- #
@@ -303,8 +259,10 @@ class MultiModalDiffusion(nn.Module):
         device = next(self.dit.parameters()).device
         g = torch.Generator(device=device).manual_seed(seed or torch.seed())
 
-        if guidance_scale > 1.0:
-            labels_cat = (labels if labels is not None else torch.zeros(batch_size, dtype=torch.long, device=device))
+        if guidance_scale > 1.0:  # build 2B batch
+            labels_cond = (labels if labels is not None else torch.zeros(batch_size, dtype=torch.long, device=device))
+            labels_uncond = torch.full_like(labels_cond, self.dit.NULL_ID)
+            labels_cat = torch.cat([labels_cond, labels_uncond], 0)
         else:
             labels_cat = labels
 
@@ -318,16 +276,8 @@ class MultiModalDiffusion(nn.Module):
         N = num_steps
 
         # -------- initial noise --------------------------------- #
-        def choose_best_noise(shape):
-            n1, n2 = torch.randn(shape, generator=g, device=device), torch.randn(shape, generator=g, device=device)
-            return torch.where((n2.square().mean(dim=tuple(range(1, n2.ndim))) > n1.square().mean(dim=tuple(range(1, n1.ndim)))).view(-1, *([1] * (len(shape) - 1))), n2, n1)
-
-        if getattr(self, "noise_select", False):
-            x_img = choose_best_noise((batch_size, 4, 32, 32)).double()
-            x_tab = choose_best_noise((batch_size, self.tab_outdim)).double()
-        else:
-            x_img = torch.randn(batch_size, 4, 32, 32, generator=g, device=device).double()
-            x_tab = torch.randn(batch_size, self.tab_outdim, generator=g, device=device).double()
+        x_img = torch.randn(batch_size, 4, 32, 32, generator=g, device=device).double()
+        x_tab = torch.randn(batch_size, self.tab_outdim, generator=g, device=device).double()
 
         # -------- branch‑specific σ0 ----------------------------- #
         σ0 = sigmas[0]
@@ -343,7 +293,6 @@ class MultiModalDiffusion(nn.Module):
         cfg_fwd = (partial(self.dit.forward, cfg=guidance_scale) if guidance_scale > 1.0 else self.dit.forward)
 
         # -------- main loop ------------------------------------- #
-        prev_img, prev_tab = None, None
         for i in range(N):
             σ_i = sigmas[i].double()
             σ_ip1 = sigmas[i + 1].double()
@@ -378,11 +327,6 @@ class MultiModalDiffusion(nn.Module):
             t_img = _log_sigma_to_t(σ_hat).repeat(batch_size)
             t_tab = t_img.clone()
 
-            # --------------- balanced guidance -----------------
-            if guidance_scale > 1.0 and self.edm is not None:
-                scale_step = 1.0 + (guidance_scale - 1.0) * i / (N - 1)
-            else:
-                scale_step = guidance_scale
             # predict ε
             out = cfg_fwd(
                 x_img=x_img_hat.float() * (1.0 / (self.edm.sigma_data ** 2 + σ_hat ** 2).sqrt()),
@@ -391,11 +335,7 @@ class MultiModalDiffusion(nn.Module):
                 t_tab=t_tab,
                 labels=labels_cat,
                 mask_ratio=0.0,
-                self_cond_img = prev_img,
-                self_cond_tab = prev_tab,
-                cfg=scale_step
             )
-            prev_img, prev_tab = out["image_sample"].detach(), out["tab_sample"].detach()
 
             D_img = self._to_D(x_img_hat, σ_hat, out["image_sample"])
             D_tab = self._to_D(x_tab_hat, σ_hat_tab, out["tab_sample"])
@@ -461,12 +401,8 @@ def load_diffusion(cfg: DictConfig, dit_model, **overrides):
     Extra keyword args override (or add) fields in *cfg* exactly like the other
     loaders.
     """
-
     final_cfg = _merge_cfg(cfg, overrides)
     diffusion_model = MultiModalDiffusion(dit=dit_model, **final_cfg)
-
-    if "noise_select" in cfg and cfg.noise_select:
-        diffusion_model.noise_select = True
     return diffusion_model
 
 

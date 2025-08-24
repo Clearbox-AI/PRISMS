@@ -21,7 +21,7 @@ def ntuple(n: int):
 def create_norm(norm_type: str, dim: int, eps: float = 1e-6) -> nn.Module:
     if norm_type == "layernorm":
         return nn.LayerNorm(dim, eps=eps, elementwise_affine=True)
-    elif norm_type in {"np_layernorm", "adanorm"}:
+    elif norm_type == "np_layernorm":
         return nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
     else:
         raise ValueError(f"Unsupported norm type: {norm_type}")
@@ -88,12 +88,7 @@ class FeedForwardECMoe(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, D = x.shape
-        # warm-up: gate closed first 500 steps
-        if self.training and hasattr(self, "step_counter"):
-            scale = min(self.step_counter.item() / 500.0, 1.0)
-        else:
-            scale = 1.0
-        scores = scale * self.gate(x)
+        scores = self.gate(x)  # (B,T,E)
         probs = F.softmax(scores, dim=-1)  # differentiable
 
         # auxiliary load‑balancing loss (factor 0.01 is user‑tunable)
@@ -516,17 +511,17 @@ class MultiModalDiTBlockImgToTab(_AdaLNBlockBase):
                           if qkv_ratio != 1.0 else dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         # modules -------------------------------------------------------------
-        self.norm1_x = create_norm("np_layernorm", dim, eps=norm_eps)
+        self.norm1_x = create_norm("layernorm", dim, eps=norm_eps)
         self.attn_x = SelfAttention(dim, qkv_hidden_dim // head_dim, qkv_bias=use_bias,
                                     hidden_dim=qkv_hidden_dim,
                                     init_std=0.02 / math.sqrt(2 * (layer_id + 1)) if depth_init else 0.02 / math.sqrt(
                                         2 * num_layers))
-        self.norm2_x = create_norm("np_layernorm", dim, eps=norm_eps)
+        self.norm2_x = create_norm("layernorm", dim, eps=norm_eps)
         self.cross_x = CrossAttention(dim, qkv_hidden_dim // head_dim, qkv_bias=use_bias,
                                       hidden_dim=qkv_hidden_dim,
                                       init_std=0.02 / math.sqrt(2 * (layer_id + 1)) if depth_init else 0.02 / math.sqrt(
                                           2 * num_layers))
-        self.norm3_x = create_norm("np_layernorm", dim, eps=norm_eps)
+        self.norm3_x = create_norm("layernorm", dim, eps=norm_eps)
         self.mlp_x = FeedForward(dim, mlp_hidden_dim, multiple_of,
                                  use_bias,
                                  init_std=0.02 / math.sqrt(2 * (layer_id + 1)) if depth_init else 0.02 / math.sqrt(
@@ -576,15 +571,15 @@ class MultiModalDiTBlockTabToImg(_AdaLNBlockBase):
                           if qkv_ratio != 1.0 else dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
 
-        self.norm1_t = create_norm("np_layernorm", dim, eps=norm_eps)
+        self.norm1_t = create_norm("layernorm", dim, eps=norm_eps)
         self.attn_t  = SelfAttention(dim, qkv_hidden_dim // head_dim, qkv_bias=use_bias,
                                      hidden_dim=qkv_hidden_dim,
                                      init_std=0.02 / math.sqrt(2 * (layer_id + 1)) if depth_init else 0.02 / math.sqrt(2 * num_layers))
-        self.norm2_t = create_norm("np_layernorm", dim, eps=norm_eps)
+        self.norm2_t = create_norm("layernorm", dim, eps=norm_eps)
         self.cross_t = CrossAttention(dim, qkv_hidden_dim // head_dim, qkv_bias=use_bias,
                                       hidden_dim=qkv_hidden_dim,
                                       init_std=0.02 / math.sqrt(2 * (layer_id + 1)) if depth_init else 0.02 / math.sqrt(2 * num_layers))
-        self.norm3_t = create_norm("np_layernorm", dim, eps=norm_eps)
+        self.norm3_t = create_norm("layernorm", dim, eps=norm_eps)
         self.mlp_t   = FeedForward(dim, mlp_hidden_dim, multiple_of,
                                    use_bias,
                                    init_std=0.02 / math.sqrt(2 * (layer_id + 1)) if depth_init else 0.02 / math.sqrt(2 * num_layers))
@@ -616,68 +611,34 @@ class MultiModalDiTBlockTabToImg(_AdaLNBlockBase):
         return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 class FinalTabHead(nn.Module):
-    """
-    Outputs:
-      • one scalar for every numeric feature
-      • k logits for every categorical feature   (cat_mode == "logits")
-    The result is concatenated → shape (B, F)   where F = num_numeric + Σk.
-    """
+    """Maps transformer tokens → numeric prediction for each tab column."""
+
     def __init__(
         self,
         in_dim: int,
         time_emb_dim: int,
-        num_numeric: int,
-        cat_dims: List[int],          # list of k_i
-        *,
+        num_cols: int,
         act_layer=nn.SiLU,
         norm_eps: float = 1e-6,
     ) -> None:
         super().__init__()
-        self.num_numeric = num_numeric
-        self.cat_dims    = cat_dims
-        self.num_feats   = num_numeric + sum(cat_dims)
-
-        # --- shared normalisation + AdaLN ---------------------------------
+        self.num_cols = num_cols
         self.norm_final = nn.LayerNorm(in_dim, eps=norm_eps)
         self.adaLN = nn.Sequential(
             act_layer(),
             nn.Linear(time_emb_dim, 2 * in_dim)
         )
+        self.linear = nn.Linear(in_dim, 1)
+        nn.init.trunc_normal_(self.linear.weight, std=0.02 / math.sqrt(in_dim))
+        nn.init.constant_(self.linear.bias, 0.)
 
-        # --- per-feature projection heads ---------------------------------
-        #  • numeric  → Linear(D,1)
-        #  • each cat → Linear(D,k_i)
-        proj = []
-        for _ in range(num_numeric):
-            proj.append(nn.Linear(in_dim, 1))
-        for k in cat_dims:
-            proj.append(nn.Linear(in_dim, k))
-        self.proj = nn.ModuleList(proj)
-
-        # xavier-style init (DiT default)
-        for p in self.proj:
-            nn.init.trunc_normal_(p.weight, std=0.02 / math.sqrt(in_dim))
-            nn.init.constant_(p.bias, 0.)
-
-    # ---------------------------------------------------------------------
     def forward(self, tokens: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
-        """
-        tokens: (B, 1+C, D)  – includes CLS.
-        returns: (B, F)
-        """
-        B = tokens.size(0)
-        col_tokens = tokens[:, 1:, :]                     # (B,C,D)
+        col_tokens = tokens[:, 1:, :]                          # (B,C,D)
         col_tokens = self.norm_final(col_tokens)
-
-        shift, scale = self.adaLN(t_emb).chunk(2, dim=1)  # (B,D) each
+        shift, scale = self.adaLN(t_emb).chunk(2, dim=1)
         col_mod = col_tokens * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
-        # -------- project feature-wise ------------------------------------
-        outs = []
-        for i, head in enumerate(self.proj):
-            feat_tok = col_mod[:, i, :]                   # (B,D)
-            outs.append(head(feat_tok))                  # (B, out_dim_i)
-        return torch.cat(outs, dim=1)                     # (B,F)
+        out = self.linear(col_mod).squeeze(-1)                 # (B,C)
+        return out
 
 
 class ViTPatchMixerBlock(_AdaLNBlockBase):
@@ -698,15 +659,15 @@ class ViTPatchMixerBlock(_AdaLNBlockBase):
         mlp_hidden_dim = int(dim * mlp_ratio)
 
         # sub‑layers ----------------------------------------------------------
-        self.norm1 = create_norm("np_layernorm", dim, eps=norm_eps)
+        self.norm1 = create_norm("layernorm", dim, eps=norm_eps)
         self.attn  = SelfAttention(dim, qkv_hidden_dim // head_dim, qkv_bias=use_bias,
                                    hidden_dim=qkv_hidden_dim,
                                    init_std=0.02 / math.sqrt(2 * (layer_id + 1)) if depth_init else 0.02 / math.sqrt(2 * num_layers))
-        self.norm2 = create_norm("np_layernorm", dim, eps=norm_eps)
+        self.norm2 = create_norm("layernorm", dim, eps=norm_eps)
         self.cross = CrossAttention(dim, qkv_hidden_dim // head_dim, qkv_bias=use_bias,
                                     hidden_dim=qkv_hidden_dim,
                                     init_std=0.02 / math.sqrt(2 * (layer_id + 1)) if depth_init else 0.02 / math.sqrt(2 * num_layers))
-        self.norm3 = create_norm("np_layernorm", dim, eps=norm_eps)
+        self.norm3 = create_norm("layernorm", dim, eps=norm_eps)
         self.mlp   = FeedForward(dim, mlp_hidden_dim, multiple_of,
                                  use_bias,
                                  init_std=0.02 / math.sqrt(2 * (layer_id + 1)) if depth_init else 0.02 / math.sqrt(2 * num_layers))
@@ -862,7 +823,7 @@ class MultiModalDiT(nn.Module):
         # Experts (MoE)
         num_experts=8,
         expert_capacity=1.0,
-        experts_every_n=2,
+        experts_every_n=2
     ):
         super().__init__()
 
@@ -1034,23 +995,16 @@ class MultiModalDiT(nn.Module):
             patch_size=patch_size,
             out_chans=self.out_channels,
             act_layer=nn.GELU,
-            norm_layer=create_norm('np_layernorm', dim, eps=norm_eps),
+            norm_layer=create_norm('layernorm', dim, eps=norm_eps),
         )
 
         self.final_tab = FinalTabHead(
             in_dim=dim,
             time_emb_dim=dim,
-            num_numeric=self.num_numeric,
-            cat_dims=self.cat_dims,
+            num_cols=self.num_tab_columns,
             act_layer=nn.GELU,
-            norm_eps=norm_eps,
+            norm_eps=norm_eps
         )
-
-        # patch correct head-out for (num + cat) → choose strategy here
-        cat_out = sum(self.cat_dims)
-        self.final_tab.linear = nn.Linear(dim, self.num_numeric + cat_out)
-        nn.init.trunc_normal_(self.final_tab.linear.weight, std=0.02 / math.sqrt(dim))
-        nn.init.constant_(self.final_tab.linear.bias, 0.)
 
         # mask token
         self.register_buffer("mask_token", torch.zeros(1, 1, patch_size**2*self.out_channels))
@@ -1080,9 +1034,7 @@ class MultiModalDiT(nn.Module):
             t_tab: torch.Tensor,  # (B,)   timestep for tab branch
             labels: Optional[torch.Tensor] = None,
             cfg: float = 1.0,  # guidance scale
-            mask_ratio: float = 0.0,
-            self_cond_img: Optional[torch.Tensor] = None,
-            self_cond_tab: Optional[torch.Tensor] = None,
+            mask_ratio: float = 0.0
     ):
         """
         If tab is None => unconditional generation (the model sees zero tab embeddings).
@@ -1095,7 +1047,7 @@ class MultiModalDiT(nn.Module):
             labels = torch.full_like(t_img, self.NULL_ID, dtype=torch.long)
 
         if cfg == 1.0:
-            return self._forward_no_cfg(x_img, x_tab, t_img, t_tab, mask_ratio=mask_ratio, labels=labels, self_cond_img=self_cond_img, self_cond_tab=self_cond_tab,)
+            return self._forward_no_cfg(x_img, x_tab, t_img, t_tab, mask_ratio=mask_ratio, labels=labels)
         else:
             return self._forward_with_cfg(x_img, x_tab, t_img, t_tab, cfg=cfg, mask_ratio=mask_ratio, labels=labels)
 
@@ -1107,20 +1059,12 @@ class MultiModalDiT(nn.Module):
             t_tab: torch.Tensor,
             labels: Optional[torch.Tensor],
             mask_ratio: float = 0.0,
-            self_cond_img: Optional[torch.Tensor] = None,
-            self_cond_tab: Optional[torch.Tensor] = None,
     ):
 
         # -- timestep + class embeddings ------------------------------
         label_emb = self.class_emb(labels)  # (B,D)
         t_emb_img = self.t_embedder(t_img) + label_emb
         t_emb_tab = self.t_embedder(t_tab) + label_emb
-
-        # -- optional self-conditioning -------------------------------
-        if self_cond_img is not None:
-            x_img = x_img + self_cond_img
-        if self_cond_tab is not None:
-            x_tab = x_tab + self_cond_tab
 
         # -- patchify image -------------------------------------------
         img_tokens = self.x_embedder(x_img) + self.pos_embed  # (B,T,D)
@@ -1218,9 +1162,7 @@ class MultiModalDiT(nn.Module):
             t_img_cat,
             t_tab_cat,
             labels=labels_cat,
-            mask_ratio=mask_ratio,
-            self_cond_img=None,  # always off in CFG mix
-            self_cond_tab = None,
+            mask_ratio=mask_ratio
         )
 
         # split & mix ----------------------------------------------------

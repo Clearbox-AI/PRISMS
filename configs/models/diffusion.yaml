@@ -66,7 +66,11 @@ diffusion:
   P_mean: -1.2
   P_std: 1.2
 
-  S_churn: 0.30
-  S_min: 2e-3
+  S_churn: 0.30 #80.0 #0.30
+  S_min: 2e-3 #0.002 #2e-3
   S_max: 30.0
-  S_noise: 1.0
+  S_noise: 1.0 #1.007 #1.0
+
+  # tried 21/07
+#  guidance_schedule: "linear"    # 2.4
+#  guidance_max: 5.0

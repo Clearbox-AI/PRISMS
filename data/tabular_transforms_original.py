@@ -12,34 +12,6 @@ from sklearn.preprocessing import (
 )
 from sklearn.impute import SimpleImputer
 
-
-class _CatLogits:
-    """Utility to convert one-hot ⇄ logits per *single* feature."""
-    EPS = 1e-4
-    @staticmethod
-    def fwd(oh: np.ndarray) -> np.ndarray:          # one-hot → logits
-        return logit(np.clip((oh + _CatLogits.EPS) /
-                             (1 + _CatLogits.EPS),
-                             _CatLogits.EPS, 1 - _CatLogits.EPS))
-
-    @staticmethod
-    def inv(logits: np.ndarray) -> np.ndarray:
-        """
-        logits → one-hot (Gumbel-Softmax)
-        During training you want a *high* τ (≈ 1.0) for smoother gradients,
-        and during pure sampling you want τ→0 for sharp argmax.
-        We follow TabDDPM and anneal τ exponentially with global step.
-        """
-        import torch, torch.nn.functional as F
-        try:
-            gstep = torch.distributed.get_rank()  # non-DDP falls back except
-        except Exception:
-            gstep = 0
-        tau_sched = max(0.5, 1.0 * (0.999 ** gstep))
-
-        t = torch.tensor(logits)
-        return F.gumbel_softmax(t, tau=tau_sched, hard=True).cpu().numpy()
-
 CAT_MISSING = "__nan__"
 EPS = 1e-5
 
@@ -116,9 +88,6 @@ class FittedTransforms:
     cat_features: List[str]
     cat_dims    : List[int]
     feature_list: List[str]
-    cat_mode: Literal["onehot", "logits", "bits"] = "logits" #"onehot"
-    # for "bits" we store bit-width per feature
-    cat_bits: List[int] | None = None
 
     # ------------- I/O convenience -----------------------------------
     def dump(self, path: Path):
@@ -173,28 +142,7 @@ def forward_transform(ft: FittedTransforms, row: np.ndarray) -> np.ndarray:
             if np.isnan(val):
                 val = CAT_MISSING
             cat_vals.append(val)
-        onehot = ft.cat_encoder.transform([cat_vals]).ravel()
-        if ft.cat_mode == "logits":
-            encs, start = [], 0
-            for k in ft.cat_dims:  # slice per feature
-                oh_slice = onehot[start:start + k]
-                encs.append(_CatLogits.fwd(oh_slice))
-                start += k
-            cat_enc = np.concatenate(encs, dtype=np.float32)
-        elif ft.cat_mode == "bits":
-            # pack each feature into binary code
-            encs = []
-            start = 0
-            for k_i, k in enumerate(ft.cat_dims):
-                code = onehot[start:start + k].argmax()
-                w = ft.cat_bits[k_i]
-                bits = np.unpackbits(np.array([code], np.uint8), bitorder="little")[: w]
-                encs.append(bits.astype(np.float32))
-                start += k
-            cat_enc = np.concatenate(encs, dtype=np.float32)
-        else:
-            cat_enc = onehot
-
+        cat_enc = ft.cat_encoder.transform([cat_vals]).ravel()
         out.append(cat_enc)
 
     # --- numeric ------------------------------------------------------
@@ -231,24 +179,9 @@ def inverse_transform(ft: FittedTransforms, x: np.ndarray) -> np.ndarray:
 
     # categorical
     if ft.cat_features:
-        if ft.cat_mode == "logits":
-            one_hots, idx = [], 0
-            for k in ft.cat_dims:
-                log_slice = cat_part[:, idx:idx + k]
-                one_hots.append(_CatLogits.inv(log_slice))
-                idx += k
-            oh = np.concatenate(one_hots, axis=1)
-            cats = ft.cat_encoder.inverse_transform(oh)
-        elif ft.cat_mode == "bits":
-            codes, idx = [], 0
-            for w in ft.cat_bits:
-                bits = cat_part[:, idx:idx + w]
-                code = np.packbits(bits.round().astype(np.uint8), bitorder="little")[:, 0]
-                codes.append(code.reshape(-1, 1))
-                idx += w
-            cats = ft.cat_encoder.inverse_transform(np.concatenate(codes, 1))
-        else:
-            cats = ft.cat_encoder.inverse_transform(cat_part)
+        cats = ft.cat_encoder.inverse_transform(cat_part)
         for j, col in enumerate(ft.cat_features):
             raw[:, ft.feature_list.index(col)] = cats[:, j].astype(np.float32)
+
+    #return raw.squeeze()
     return raw
