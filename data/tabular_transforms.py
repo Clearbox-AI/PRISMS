@@ -1,7 +1,7 @@
 import json, pickle, math
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Union, Literal, Any
+from typing import Dict, List, Tuple, Union, Literal, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -64,8 +64,8 @@ class NumSpec:
     """
     kind   : Literal["std", "log1p", "logit", "qt"]
     scaler : Any                    # StandardScaler | MinMaxScaler | QT
-    min    : float | None = None
-    max    : float | None = None
+    min: Optional[float] = None
+    max: Optional[float] = None
     is_int : bool = False           # round after inverse if True
 
 def _build_num_pipeline(meta: dict) -> Tuple[Pipeline, NumSpec]:
@@ -118,7 +118,7 @@ class FittedTransforms:
     feature_list: List[str]
     cat_mode: Literal["onehot", "logits", "bits"] = "logits" #"onehot"
     # for "bits" we store bit-width per feature
-    cat_bits: List[int] | None = None
+    cat_bits: Optional[List[int]] = None
 
     # ------------- I/O convenience -----------------------------------
     def dump(self, path: Path):
@@ -148,9 +148,14 @@ def fit_on_dataframe(df: pd.DataFrame, meta: List[dict]) -> FittedTransforms:
             pipe.fit(df[[name]].values)
             num_pipes[name], num_specs[name] = pipe, spec
 
-    cat_encoder = OneHotEncoder(dtype=np.float32,
-                                handle_unknown='ignore',
-                                sparse_output=False)
+    try:
+        cat_encoder = OneHotEncoder(dtype=np.float32,
+                                    handle_unknown='ignore',
+                                    sparse_output=False)
+    except TypeError:  # scikit-learn < 1.2
+        cat_encoder = OneHotEncoder(dtype=np.float32,
+                                    handle_unknown='ignore',
+                                    sparse=False)
     if cats:
         cat_encoder.fit(df[cats].fillna(CAT_MISSING).values)
 

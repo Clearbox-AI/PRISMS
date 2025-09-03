@@ -82,6 +82,7 @@ diffusion:
 training:
   # diffusion model
   device: "cuda"
+  swarm_run: true
   sample_batch_size: 4
 
   grad_accum: 2
@@ -92,6 +93,7 @@ training:
   # hyperparameters
   epochs: 6000
   save_model_interval: 2500
+  save_artifacts: true
   lr: 1.5e-4 #2e-4
   # sampling
   sample_conditioning: 1.0
@@ -101,9 +103,9 @@ training:
 
   # logging/saving
   log_interval: 200
-  base_save_path: "/mnt/storage/nacc_sub/dit"
+  base_save_path: "/workspace/artifacts/nacc_sub/dit" #"/mnt/storage/nacc_sub/dit"
   save_label: "refine_freeze"
-  resume_training: true
+  resume_training: false
   resume_checkpoint_dir: "/mnt/storage/nacc_sub/dit/2025-07-22_20-27-47_refine_freeze"
 
 distributed:

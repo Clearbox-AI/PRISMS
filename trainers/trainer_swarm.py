@@ -1,10 +1,14 @@
 # trainers/trainer_swarm.py
 from __future__ import annotations
-import os, torch, torch.nn as nn
-from torch import optim
-from torch.nn.parallel import DistributedDataParallel as DDP
+import os, sys
 from pathlib import Path
 from datetime import datetime
+from typing import Any
+
+import torch, torch.nn as nn
+import torch.distributed as dist
+from torch import optim
+from torch.nn.parallel import DistributedDataParallel as DDP
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
@@ -13,17 +17,48 @@ from data.loader import load_training_data
 from data.tabular_transforms import FittedTransforms
 from enums.models.model_types import ModelType
 from models.utils.model_loader import load_model
-from models.swarm_model import SwarmMultiModalModel        # ← path fix
+from models.swarm_model import SwarmMultiModalModel
 try:
     from swarmlearning.pyt import SwarmCallback
 except ImportError:
-    from swarmlearning.pytorch import SwarmCallback                  # ← SL import
+    from swarmlearning.pytorch import SwarmCallback
 from utils.ddp import is_main_process, setup_distributed, cleanup_distributed
 from utils.model import save_checkpoint, resume_from_checkpoint
 from utils.path_management import setup_storage_directory
 from utils.data import save_images, save_tabulars
-from utils.model import save_checkpoint
 from enums.training_versions import DiTTrainingVersion
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper DDP/Swarm utilities
+
+def _dist_available() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+def _local_rank() -> int:
+    return dist.get_rank() if _dist_available() else 0
+
+def _is_local_rank0() -> bool:
+    return _local_rank() == 0
+
+def _broadcast_from_rank0(module: nn.Module, src: int = 0) -> None:
+    """Broadcast di *tutti* i parametri e buffer CUDA dal rank src agli altri."""
+    if not _dist_available():
+        return
+    # Importante: NCCL lavora su tensori su GPU; usiamo parameters() e buffers().
+    for p in module.parameters():
+        if p.is_cuda:
+            dist.broadcast(p.data, src=src)
+    for b in module.buffers():
+        if b.is_cuda:
+            dist.broadcast(b.data, src=src)
+
+class _NoOpSwarm:
+    """Stub compatibile con SwarmCallback per i rank != 0 (nessuna chiamata allo SL)."""
+    def __init__(self, *a, **kw): pass
+    def on_train_begin(self): pass
+    def on_batch_end(self, *a, **kw): pass
+    def on_epoch_end(self, *a, **kw): pass
+    def on_train_end(self): pass
 
 # --------------------------------------------------------------------------- #
 def train_one_epoch(
@@ -35,7 +70,8 @@ def train_one_epoch(
         device: torch.device,
         global_step: int,
         base_save_path: Path,
-        swarm_cb: SwarmCallback,                    # ← NEW
+        swarm_cb: Any,  # SwarmCallback su rank0, _NoOpSwarm sugli altri
+        sw_model_for_bcast: nn.Module  # il modello *unwrap* (non-DDP) per broadcast
 ) -> tuple[int, float]:
 
     model.train()
@@ -61,31 +97,36 @@ def train_one_epoch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
+        # 2.5) ─ Swarm hook + riallineamento pesi intra-nodo
+        # Il rank0 locale può innescare il merge quando si raggiunge syncFrequency.
         swarm_cb.on_batch_end(global_step)            # ← SL hook
 
-        # 3) ─── logging -----------------------------------------------------
-        if is_main_process() and global_step % cfg.training.log_interval == 0:
-            print(f"[E{epoch+1} | S{global_step}] "
-                  f"Img {loss_img.item():.6f}  Tab {loss_tab.item():.6f} "
-                  f"Tot {last_total_loss:.6f}")
+        # Dopo la callback, *tutti* i rank locali fanno barrier + broadcast.
+        if _dist_available():
+            dist.barrier()  # allineiamo il punto del training loop
+            _broadcast_from_rank0(sw_model_for_bcast, src=0)
 
-        # 4) ─── periodic sampling ------------------------------------------
+        # 3) ─ logging
+        if is_main_process() and global_step % cfg.training.log_interval == 0:
+            print(f"[E{epoch + 1} | S{global_step}] "
+                  f"Img{loss_img.item():.6f}  Tab{loss_tab.item():.6f} "
+                  f"Tot{last_total_loss:.6f}")
+
+        # 4) ─ sampling periodico (solo rank0 globale)
         if is_main_process() and global_step % cfg.training.sample_interval == 0:
             model.eval()
             with torch.no_grad():
-                # wrapper.sample already returns *decoded* images + tables
                 img_out, tab_out = ddp_sample(model, batch_size=4, guidance_scale=2.5)
-
                 if img_out is not None:
                     save_images(base_save_path, img_out, global_step)
                 if tab_out is not None:
                     save_tabulars(base_save_path, tab_out, global_step)
             model.train()
 
-        # 5) ─── checkpoint --------------------------------------------------
+        # 5) ─ checkpoint (solo rank0 globale)
         if (cfg.training.save_model_interval and
                 global_step % cfg.training.save_model_interval == 0 and
-                is_main_process()):
+                is_main_process() and cfg.training.save_artifacts):
             save_checkpoint(base_save_path,
                             f"checkpoint_step_{global_step}.pt",
                             model, optimizer, epoch,
@@ -106,12 +147,17 @@ def train_model(cfg: DictConfig) -> None:
         torch.cuda.set_device(local_rank)
 
     # 2) ─── data -------------------------------------------------------------
-    train_loader, _ = load_training_data(cfg)
+    loaders = load_training_data(cfg)
+    # la tua API può restituire uno o due loader; rendiamola robusta
+    if isinstance(loaders, tuple):
+        train_loader, _ = loaders
+    else:
+        train_loader = loaders
 
     # 3) ─── models -----------------------------------------------------------
     device = torch.device(f"cuda:{local_rank}" if cfg.training.device == "cuda" else "cpu")
     vae   = load_model(ModelType.VAE, cfg).to(device).eval()
-    ft    = FittedTransforms.load(Path("/home/PRISMS/data/computations/tab_ft.pkl"))
+    ft    = FittedTransforms.load(Path("/workspace/artifacts/tab_ft.pkl")) if cfg.training.swarm_run else FittedTransforms.load(Path("/home/PRISMS/data/computations/tab_ft.pkl"))
     diff  = load_model(ModelType.DIFFUSION, cfg=cfg, tab_transforms=ft).to(device)
     model = SwarmMultiModalModel(vae, diff, cfg.vae.scaling_factor).to(device)
 
@@ -132,16 +178,25 @@ def train_model(cfg: DictConfig) -> None:
                                                           device,
                                                           use_ddp=cfg.distributed.use_ddp)
 
-    # 7) ─── SwarmCallback ----------------------------------------------------
-    swSync   = int(os.getenv("SYNC_INTERVAL", "20"))
+    # 7) ─ SwarmCallback (solo rank0 locale) + prima sincronizzazione intra-nodo
+    swSync = int(os.getenv("SYNC_INTERVAL", "20"))
     minPeers = int(os.getenv("MIN_PEERS", "2"))
-    # unwrap for Swarm if DDP is used
+    # unwrap per Swarm se DDP
     sw_model = model.module if isinstance(model, DDP) else model
-    swarm_cb = SwarmCallback(syncFrequency=swSync,
-                             minPeers=minPeers,
-                             model=sw_model,
-                             totalEpochs=cfg.training.epochs)
-    swarm_cb.on_train_begin()
+
+    if _is_local_rank0():
+        swarm_cb: Any = SwarmCallback(syncFrequency=swSync,
+                                      minPeers=minPeers,
+                                      model=sw_model,
+                                      totalEpochs=cfg.training.epochs)
+        swarm_cb.on_train_begin()
+    else:
+        swarm_cb = _NoOpSwarm()
+
+    # Dopo la possibile apertura sessione/merge iniziale, riallineiamo i pesi locali
+    if _dist_available():
+        dist.barrier()
+        _broadcast_from_rank0(sw_model, src=0)
 
     # 8) ─── training loop ----------------------------------------------------
     for epoch in range(start_epoch, cfg.training.epochs):
@@ -151,8 +206,12 @@ def train_model(cfg: DictConfig) -> None:
         global_step, last_loss = train_one_epoch(epoch, model, optimizer,
                                                  train_loader, cfg, device,
                                                  global_step, main_save_dir,
-                                                 swarm_cb)
+                                                 swarm_cb, sw_model)
+        # Fine epoca: SL hook solo rank0, poi broadcast per tutti
         swarm_cb.on_epoch_end(epoch)
+        if _dist_available():
+            dist.barrier()
+            _broadcast_from_rank0(sw_model, src=0)
 
     # 9) ─── final checkpoint -------------------------------------------------
     if cfg.training.save_model_interval and is_main_process():
@@ -161,9 +220,12 @@ def train_model(cfg: DictConfig) -> None:
                         model, optimizer,
                         cfg.training.epochs, global_step, last_loss,
                         use_ddp=cfg.distributed.use_ddp)
-    swarm_cb.on_train_end()
 
-    # 10) ─── cleanup ---------------------------------------------------------
+    # Chiudiamo la sessione Swarm solo su rank0 locale
+    if _is_local_rank0():
+        swarm_cb.on_train_end()
+
+    # 10) ─ cleanup
     if cfg.distributed.use_ddp:
         cleanup_distributed()
     if is_main_process():
@@ -172,9 +234,6 @@ def train_model(cfg: DictConfig) -> None:
 # --------------------------------------------------------------------------- #
 def ddp_sample(model, *args, **kw):
     return model.module.sample(*args, **kw) if isinstance(model, DDP) else model.sample(*args, **kw)
-
-# … get_main_save_directory(), FlowMonitor, param_groups() stay unchanged …
-
 
 
 def get_main_save_directory(cfg):
@@ -297,8 +356,14 @@ if __name__ == "__main__":
     from utils.configurations import set_project_root
     set_project_root()
 
+    # 1) prendi le override dalla CLI (ignora i flag in stile --qualcosa)
+    cli_overrides = [a for a in sys.argv[1:] if not a.startswith("-")]
+
     with initialize_config_dir(config_dir=str(Path(os.environ["PROJECT_ROOT"], "configs", "trainers"))):
-        cfg = compose(config_name="base_dit_training")  # Adjust if needed
+        cfg = compose(
+            config_name="base_dit_training",
+            overrides=cli_overrides
+        )  # Adjust if needed
         OmegaConf.set_struct(cfg, False)
 
         train_model(cfg)

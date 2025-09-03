@@ -1,4 +1,3 @@
-# PRISMS\trainers\trainer_swarm.py
 import torch, torch.nn as nn
 from models.vae.vae import encode_images, decode_latents
 

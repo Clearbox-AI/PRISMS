@@ -1,7 +1,7 @@
 data:
   # locations
-  data_dir: "/mnt/dataset_storage/data/adni_nacc_processing_steps/final_2d" #"/mnt/dataset_storage/data/lumir_mm_dataset_middle_slice" #"/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
-  stats_file: "/home/PRISMS/data/computations" #"..data/computations/nacc_stats.json"
+  data_dir: "/workspace/data" #"/mnt/dataset_storage/data/adni_nacc_processing_steps/final_2d"
+  stats_file: "/workspace/artifacts" #"/home/PRISMS/data/computations"
   # dimensions
   image_size: 32
   image_height: 256
