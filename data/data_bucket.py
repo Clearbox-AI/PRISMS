@@ -9,11 +9,8 @@ from data.nacc_dataset import NaccDataset
 from torch.utils.data import DataLoader
 from enums.generation import SourceType, DataLabel
 
-
-
 # TODO: maybe lazy when the input is a dataset and a path, impossible when it's already some tensor list
 # TODO: not os.path.join but pathlib.Path
-
 
 class DataBucket(Dataset):
     """

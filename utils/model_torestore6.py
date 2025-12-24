@@ -2,7 +2,7 @@ import os
 import glob
 import torch
 from pathlib import Path
-from typing import Union, Optional, List, Dict
+from typing import Union, Optional, List
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 # -----------------------------------------------------------------------------
@@ -10,6 +10,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 # -----------------------------------------------------------------------------
 
 def _ema_to_dict(ema_obj) -> dict:
+    """
+    Serializza EMA.
+      - AveragedModel: salva .module.state_dict e (opz.) n_averaged
+      - Lightweight CPUEMA: salva shadow (su CPU) + metadati
+    """
+    # AveragedModel
     if hasattr(ema_obj, "module"):
         return {
             "kind": "averaged_model",
@@ -28,25 +34,39 @@ def _ema_to_dict(ema_obj) -> dict:
             "num_updates": int(getattr(ema_obj, "num_updates", 0)),
             "base_decay": float(getattr(ema_obj, "base_decay", 0.9999)),
             "use_after_updates": int(getattr(ema_obj, "use_after_updates", 300)),
+            # back-compat: alcuni vecchi ckpt potrebbero aver salvato "decay"
             "decay": float(getattr(ema_obj, "base_decay", 0.9999)),
         }
 
     return {"kind": "none"}
 
 def _dict_to_ema(state: dict, ema_obj, device: torch.device) -> None:
+    """
+    Ripristina l'EMA **in-place** dentro `ema_obj` a partire da `state`.
+
+    Gestisce:
+      - kind="averaged_model": ema stile PyTorch AveragedModel (usa .module, opz. n_averaged/decay)
+      - kind="lightweight": EMA leggera (shadow dict su CPU + metadati)
+    È retro-compatibile con vecchi checkpoint che non salvavano num_updates/base_decay
+    e dove "decay" poteva essere 0.0.
+    """
     if not state:
         return
 
     kind = state.get("kind", "averaged_model")
 
     if kind == "averaged_model":
+        # .module è il modello medio (SWA/EMA di PyTorch)
         ema_obj.module.load_state_dict(state["state_dict"])
+        # ripristina il contatore se presente
         if "num_updates" in state and hasattr(ema_obj, "n_averaged"):
+            # n_averaged in PyTorch è un tensore; copiamo il valore
             val = int(state["num_updates"])
             if isinstance(ema_obj.n_averaged, torch.Tensor):
                 ema_obj.n_averaged.copy_(torch.tensor(val, device=device))
             else:
                 ema_obj.n_averaged = torch.tensor(val, device=device)
+        # ripristina eventuale decay (API AveragedModel)
         if "decay" in state:
             try:
                 ema_obj.decay = float(state["decay"])
@@ -55,17 +75,20 @@ def _dict_to_ema(state: dict, ema_obj, device: torch.device) -> None:
         return
 
     elif kind == "lightweight":
+        # *** Parte fondamentale: le shadow restano su CPU ***
         if hasattr(ema_obj, "shadow") and "shadow" in state:
             ema_obj.shadow.clear()
             for k, v in state["shadow"].items():
                 ema_obj.shadow[k] = v.detach().clone().cpu()
 
+        # Ripristina metadati, se presenti (senza sovrascrivere con 0.0 legacy)
         if "num_updates" in state:
             try:
                 ema_obj.num_updates = int(state["num_updates"])
             except Exception:
                 pass
 
+        # Preferisci "base_decay"; altrimenti usa "decay" solo se > 0 (evita il vecchio 0.0)
         if "base_decay" in state:
             try:
                 ema_obj.base_decay = float(state["base_decay"])
@@ -88,33 +111,6 @@ def _dict_to_ema(state: dict, ema_obj, device: torch.device) -> None:
     return
 
 
-def _torch_load_safe(path: str, map_location: str | torch.device):
-    try:
-        return torch.load(path, map_location=map_location, weights_only=True)  # PyTorch recenti
-    except TypeError:
-        return torch.load(path, map_location=map_location)  # retro-compat
-
-
-def _filter_state_dict_for_model(sd: Dict[str, torch.Tensor], model: torch.nn.Module) -> Dict[str, torch.Tensor]:
-    """
-    Rimuove dal state_dict tutte le chiavi NON presenti nel modello corrente.
-    (es.: contatori/buffer di training come '_tabsyn_pt_step' salvati in passato.)
-    """
-    model_keys = set(model.state_dict().keys())
-    # Copia shallow e filtra
-    filtered = {k: v for k, v in sd.items() if k in model_keys}
-    dropped = [k for k in sd.keys() if k not in model_keys]
-    if dropped:
-        # Evita flood: stampa solo le prime N chiavi
-        N = 10
-        head = ", ".join(dropped[:N])
-        more = f" (… +{len(dropped)-N} more)" if len(dropped) > N else ""
-        print(f"[state_dict] Dropped {len(dropped)} unexpected key(s): {head}{more}")
-    return filtered
-
-
-
-
 def load_checkpoint(model: torch.nn.Module, checkpoint_path: str, device: str) -> None:
     """
     Loads the checkpoint into the given model.
@@ -124,13 +120,9 @@ def load_checkpoint(model: torch.nn.Module, checkpoint_path: str, device: str) -
         checkpoint_path (str): Path to the checkpoint file.
         device (str): Device to map the checkpoint to.
     """
-    ckpt = _torch_load_safe(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint_path, map_location=device)
     raw_sd = ckpt["model_state_dict"]
-    # Filtra chiavi inattese prima del load (resta strict=True)
-    from utils.ddp import strip_ddp_prefix
-    sd = strip_ddp_prefix(raw_sd, "module")
-    sd = _filter_state_dict_for_model(sd, model)
-    model.load_state_dict(sd, strict=True)
+    model.load_state_dict(raw_sd, strict=True)
 
 
 def save_checkpoint(
@@ -188,7 +180,7 @@ def resume_from_checkpoint(
     if is_main_process():
         print(f"Resuming training from checkpoint: {resume_path}")
 
-    ckpt = _torch_load_safe(resume_path, map_location=device)
+    ckpt = torch.load(resume_path, map_location=device)
 
     # ---- load optimiser & step counters ------------------------------------
     start_epoch = ckpt.get("epoch", 0)
@@ -200,8 +192,6 @@ def resume_from_checkpoint(
     raw_sd = ckpt["model_state_dict"]
     sd = strip_ddp_prefix(raw_sd, "module")
     target = model.module if (use_ddp and isinstance(model, DDP)) else model
-    # Filtra chiavi inattese prima del load (resta strict=True)
-    sd = _filter_state_dict_for_model(sd, target)
     target.load_state_dict(sd, strict=True)
 
     # ---- load EMA -----------------------------------------------------------

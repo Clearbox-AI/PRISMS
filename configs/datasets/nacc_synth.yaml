@@ -1,10 +1,11 @@
 data_synth:
-  data_dir: "/mnt/storage/nacc_sub/generated/2025-07-25_09-48-46_v4" #"/mnt/storage/nacc_sub/generated"
+  data_dir: "/mnt/storage/nacc_sub/generated/2025-10-27_06-29-00_8bis_sempl_senzaselfjoin"
   dataset_type: "nacc_synth"
-  num_samples: 500
+  num_samples: 1000
   stats_file: "/home/PRISMS/data/computations/nacc_stats.json"
   batch_size: 16
   num_workers: 4
   # processing
   shuffle: false
   debug: true
+  regen_tab_ft: false

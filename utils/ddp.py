@@ -63,3 +63,8 @@ def _unwrap(model):
 
 def ddp_sample(model, *args, **kwargs):
     return _unwrap(model).sample(*args, **kwargs)
+
+# def ddp_sample(model, *args, **kwargs):
+#     if isinstance(model, DDP):
+#         return model.module.sample(*args, **kwargs)
+#     return model.sample(*args, **kwargs)

@@ -44,3 +44,23 @@ def infinite_loader(dataloader: DataLoader):
     while True:
         for batch in dataloader:
             yield batch
+
+# ---------------------------------------------------------------------------
+# Dynamic Thresholding in *pixel space* (Imagen-style)
+# Applicata DOPO la decodifica VAE, non in latente.
+# (Compatibile con immagini in range [-1, 1] o [0, 1].)
+# ---------------------------------------------------------------------------
+def _dynamic_threshold_pixel(
+    imgs: torch.Tensor,
+    p: float = 0.995,
+    rescale: bool = False
+) -> torch.Tensor:
+    if imgs.ndim != 4:
+        return imgs
+    B = imgs.shape[0]
+    v = imgs.detach().abs().flatten(1)
+    q = torch.quantile(
+        v, torch.tensor(float(p), device=imgs.device), dim=1, keepdim=True
+    ).clamp(min=1e-3)
+    clamped = imgs.clamp(-q.view(B, 1, 1, 1), q.view(B, 1, 1, 1))
+    return (clamped / q.view(B, 1, 1, 1)) if rescale else clamped

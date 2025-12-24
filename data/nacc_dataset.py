@@ -1,15 +1,8 @@
 import os
 import json
 import cv2
-import numpy as np
-import torch
 import torch.distributed as dist
 from typing import List, Dict
-from monai.transforms import (
-    Compose, RandFlip, RandRotate, RandZoom,
-    RandGaussianNoise, RandBiasField, RandAdjustContrast
-)
-from sklearn.preprocessing import StandardScaler
 from typing import Optional, Union
 from pathlib import Path
 
@@ -128,7 +121,9 @@ class NaccDataset(BaseNaccDataset):
             rows.append(dict(zip(self.feature_names, lst)))
         df = pd.DataFrame(rows)
 
-        ft = fit_on_dataframe(df, meta_entries)
+        ft = fit_on_dataframe(
+            df, meta_entries
+        )
 
         return ft
 
@@ -184,8 +179,10 @@ class NaccDataset(BaseNaccDataset):
         with open(os.path.join(pdir, "tabular.json")) as f:
             jdata = json.load(f)
         raw = jdata.get("patient_id", list(jdata.values())[0])
-        raw = np.array(raw, dtype=np.float32)
-        # raw = np.where(raw >= 9999, -1, raw) # sentinel replacement
+        # raw = np.array(raw, dtype=np.float32)
+        raw = np.asarray(raw, dtype=np.float32).reshape(-1)
+        # considera qualsiasi valore "anomalo" (>=9999) come missing
+        raw = np.where(raw >= 9999, np.nan, raw)
         tab = forward_transform(self.ft, raw)
         tab_tensor = torch.from_numpy(tab)
 
@@ -267,7 +264,6 @@ class NaccDataset(BaseNaccDataset):
             return image
 
 
-
 # ----- MONAI: intensity & scanner-noise transforms ----------
 intensity_aug = Compose([
     # Smooth coil-bias / B1 inhomogeneity  -------------------
@@ -340,3 +336,26 @@ def augment_mri_slice(np_slice: np.ndarray) -> np.ndarray:
     # 3) Back to numpy [H, W]
     aug_slice = tio_img.data.squeeze().numpy()
     return aug_slice
+
+
+
+if __name__ == "__main__":
+    dataset = NaccDataset(
+                    data_dir="/mnt/dataset_storage/data/adni_nacc_processing_steps/final_2d",
+                    image_height=256,
+                    image_width=256,
+                    domain="mri",
+                    do_augment=False,
+                    do_image_normalize=True,
+                    do_tabular_normalize=False,
+                    target_channels=1,
+                    final_image_range=ImageRange("minus1to1"),
+                    debug=True,
+                    stats_file="/home/PRISMS/data/computations",
+                    meta_json="/home/PRISMS/data/computations/nacc_meta.json",
+                    tab_ft_path=None,
+                    regen_tab_ft=False
+                )
+
+    sample = dataset[0]
+    img, tab, meta = sample["image"], sample["tabular"], sample["metadata"]

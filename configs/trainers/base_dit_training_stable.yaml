@@ -1,42 +1,9 @@
 defaults:
-#  - ../../configs/default_project@_global_
-#  - ../models/dit@_global_
   - ../models/vae@_global_
   - ../datasets/nacc@_global_
   - _self_
 
-
 dit:
-#  # base input settings
-#  input_size: 32
-#  patch_size: 2
-#  in_channels: 4
-#  dim: 256
-#  depth: 24
-#  head_dim: 32
-#  multiple_of: 128
-#  qkv_ratio: 2
-#  mlp_ratio: 8
-#  norm_eps: 1e-6
-#  depth_init: True
-#  use_bias: True
-#  # tabular settings
-#  num_tab_columns: 174
-#  tab_groups: 10
-#  out_table_features: 174
-#  # Patch mixer
-##  use_patch_mixer: true
-##  patch_mixer_depth: 4
-##  patch_mixer_dim: 256
-##  patch_mixer_qkv_ratio: 1.0
-##  patch_mixer_mlp_ratio: 4.0
-#  # Experts (MoE)
-#  num_experts: 8
-#  expert_capacity: 1.0
-#  moe_frequency: 4
-
-
-
   img_in_channels: 4
   img_height: 32
   img_width: 32
@@ -57,19 +24,6 @@ dit:
   experts_every_n: 2
   num_experts: 16 #8
   expert_capacity: 1.0
-
-#  use_patch_mixer_img: True
-#  patch_mixer_depth_img: 6
-#  patch_mixer_dim_img: 512
-#  patch_mixer_mlp_ratio_img: 4.0
-#  patch_mixer_qkv_ratio_img: 1.0
-#
-#  use_patch_mixer_tab: True
-#  patch_mixer_depth_tab: 3
-#  patch_mixer_dim_tab: 256
-#  patch_mixer_mlp_ratio_tab: 4.0
-#  patch_mixer_qkv_ratio_tab: 1.0
-
   use_patch_mixer_img: True
   patch_mixer_depth_img: 4 #2
   patch_mixer_dim_img: 256 #128
@@ -81,8 +35,6 @@ dit:
   patch_mixer_dim_tab: 256 #128
   patch_mixer_mlp_ratio_tab: 4.0
   patch_mixer_qkv_ratio_tab: 1.0
-
-
 
 data:
   dataset_type: "nacc"

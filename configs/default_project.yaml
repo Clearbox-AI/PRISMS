@@ -1,6 +1,6 @@
 data:
   dataset_type: "nacc"  #"nacc" "nacc_adapter"
-  data_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice" # "/mnt/dataset_storage/data/nacc_dataset/nacc_dataset_ditvae_adapter" "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
+  data_dir: "/mnt/dataset_storage/data/nacc_dataset/nacc_subset/middle_slice"
   batch_size: 4
   num_workers: 0
   image_size: 64
@@ -67,8 +67,6 @@ adapter:
   model_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/adapter"
   checkpoint: "/mnt/storage/nacc_sub/mm_dit_con_vae/checkpoints/checkpoint_step_15000_final.pt"
   sample_save_dir: "/mnt/storage/nacc_sub/mm_dit_con_vae/adapter"
-
-#  in_channels: 4,  # 4 if latents are 4 channels
   nce_embed_dim: 128  # e.g. 128
   nce_patch_size: 8  # e.g. 8
   nce_num_patches: 64   # e.g. 64

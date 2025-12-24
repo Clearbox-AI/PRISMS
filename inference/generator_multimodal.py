@@ -15,7 +15,19 @@ from datetime import datetime
 from tqdm import tqdm
 from utils.model import resume_from_checkpoint
 from sklearn.preprocessing import StandardScaler
+from data.tabular_transforms import inverse_transform
 
+import torch.distributed as dist
+from utils.ddp import setup_distributed, cleanup_distributed, is_main_process
+
+# ------------------------------------------------------------------------- #
+# small helper to broadcast a Python object (e.g., a string path) in DDP
+def _bcast_obj(obj, src=0):
+    if not (dist.is_available() and dist.is_initialized()):
+        return obj
+    lst = [obj]
+    dist.broadcast_object_list(lst, src=src)
+    return lst[0]
 
 # ------------------------------------------------------------------------- #
 # directory helpers                                                         #
@@ -39,7 +51,16 @@ def get_next_run_dir(base_dir: Path, label: Optional[str] = None) -> Path:
 # ------------------------------------------------------------------------- #
 @torch.no_grad()
 def generate(cfg: DictConfig):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # ---------- DDP setup (optional) ------------------------------------- #
+    local_rank = 0
+    ddp = bool(cfg.distributed.get("use_ddp", False))
+    if ddp:
+        local_rank = setup_distributed(cfg)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    world = dist.get_world_size() if (ddp and dist.is_initialized()) else 1
+    rank = dist.get_rank() if (ddp and dist.is_initialized()) else 0
 
     # 1) ---------- load models ------------------------------------------- #
     vae = load_model(ModelType.VAE, cfg=cfg).to(device).eval()
@@ -57,57 +78,134 @@ def generate(cfg: DictConfig):
         model=diff,
         optimizer=None,
         device=device,
-        use_ddp=cfg.distributed.use_ddp
+        use_ddp=False
     )
+
+    # (A) Ensure deterministic inference: disable training-time stochastic gates/dropout
+    diff.eval()
+    # (4.e) Optional per-run control of noise selection from synth config
+    ns = cfg.data_synth.get("noise_select", None)
+    if ns is not None:
+        try: diff.noise_select = bool(ns)
+        except Exception:
+            pass
 
     # 2) ---------- prepare output dir ------------------------------------ #
     synth_base = Path(cfg.data_synth.data_dir)
-    run_dir = get_next_run_dir(synth_base, cfg.data_synth.get("save_label"))
-    print(f"[INFO] Writing samples to {run_dir}")
+    if is_main_process():
+        run_dir = get_next_run_dir(synth_base, cfg.data_synth.get("save_label"))
+    else:
+        run_dir = None
+    # broadcast path so all ranks write into the SAME directory
+    run_dir = Path(_bcast_obj(str(run_dir) if run_dir is not None else "")) if ddp else run_dir
+    if ddp:
+        # ensure directory exists on all ranks
+        os.makedirs(run_dir, exist_ok=True)
+        dist.barrier()
+    if is_main_process():
+        print(f"[INFO] Writing samples to {run_dir}")
 
     # 4) ── sampling loop ─────────────────────────────────────────────────────
-    total = cfg.data_synth.num_samples
-    bs = cfg.data_synth.batch_size
-    n_batches = math.ceil(total / bs)
+    total_global = int(cfg.data_synth.num_samples)
+    bs = int(cfg.data_synth.batch_size)
 
-    sample_idx = 0
-    for _ in tqdm(range(n_batches), desc="Generating", unit="batch"):
-        cur_bs = min(bs, total - sample_idx)
+    # ---- Divide samples across ranks (global → local) -----------------------
+    q, r = divmod(total_global, world)
+    total_local = q + (1 if rank < r else 0)
+    start_index = rank * q + min(rank, r)  # indice globale di partenza per questo rank
+    if is_main_process():
+        print(f"[DDP] world={world} | total={total_global} | per-rank≈{q} (+1 per i primi {r})")
+    if total_local == 0:
+        if is_main_process():
+            print("[WARN] Too few samples for the number of ranks; some ranks will be idle.")
+        if ddp:
+            dist.barrier()
+            cleanup_distributed()
+        return
+    n_batches = math.ceil(total_local / bs)
 
-        half = cur_bs // 2
-        labels = torch.cat([
-            torch.zeros(half, dtype=torch.long),
-            torch.ones(cur_bs - half, dtype=torch.long)
-        ], dim=0)
-        perm = torch.randperm(cur_bs)
-        labels = labels[perm]
-        labels = labels.to(device, non_blocking=True)
+    produced = 0
+    iter_range = range(n_batches)
+    if is_main_process():
+        iter_range = tqdm(iter_range, desc="Generating", unit="batch")
+    for _ in iter_range:
+        cur_bs = min(bs, total_local - produced)
+        if cur_bs <= 0:
+            break
+
+        # Choose how to draw labels:
+        balance = bool(cfg.data_synth.get("balance_labels", False))
+        if balance:
+            # 50/50 per batch
+            half = cur_bs // 2
+            labels = torch.cat([
+                torch.zeros(half, dtype=torch.long),
+                torch.ones(cur_bs - half, dtype=torch.long)
+            ], dim=0)
+        else:
+            # draw from training priors if available
+            if hasattr(diff, "class_counts") and diff.class_counts is not None:
+                n0, n1 = diff.class_counts
+                p1 = float(n1) / float(n0 + n1 + 1e-9)
+            else:
+                p1 = 0.5
+            n_pos = int(round(cur_bs * p1))
+            labels = torch.cat([
+                torch.zeros(cur_bs - n_pos, dtype=torch.long),
+                torch.ones(n_pos, dtype=torch.long)
+            ], dim=0)
+        # shuffle and move
+        labels = labels[torch.randperm(cur_bs)].to(device, non_blocking=True)
 
         # 4.1) Sample *latent* image + tabular from diffusion
+        # branch‑aware guidance if provided
+        g_img = cfg.data_synth.get("guidance_img", None)
+        g_tab = cfg.data_synth.get("guidance_tab", None)
+        g_scale = {"img": g_img, "tab": g_tab} if (
+                g_img is not None and g_tab is not None) else cfg.data_synth.guidance_scale
+        # (4.a) reproducibility: optional global seed for this run
+        seed = cfg.data_synth.get("seed", None)
         lat_img, lat_tab = diff.sample(
             batch_size=cur_bs,
-            guidance_scale=cfg.data_synth.guidance_scale,
+            guidance_scale=g_scale,
             num_steps=cfg.data_synth.sample_steps,
-            labels=labels
+            labels=labels,
+            seed = seed,
+            return_latents = True,
         )
 
         # 4.2) Decode image latents back to pixel space
         recon_imgs = decode_latents(vae, lat_img, cfg.vae.scaling_factor)
 
-        lat_tab_np = lat_tab.cpu().numpy()  # shape (B, F)
+        # (4.c) Decode tab *latents* → model-space → inverse_transform a RAW (con categorie non numeriche)
+        if hasattr(diff, "tab_vae") and getattr(diff, "has_tabsyn_vae", lambda: False)():
+            x_tab_model = diff.tab_vae.decode_flat(lat_tab).cpu().numpy()
+        else:
+            x_tab_model = lat_tab.cpu().numpy()
+        # keep original numeric types; allow object dtype for categoricals
+        raw_np = inverse_transform(ft, x_tab_model, return_object=True)
 
         # 4.4) Write each sample to its own folder
         for b in range(cur_bs):
-            sid = f"sample_{sample_idx:06d}"
+            global_idx = start_index + produced + b
+            sid = f"sample_{global_idx:06d}"
             sd = run_dir / sid
             sd.mkdir()
 
             # image
             np.save(sd / "image.npy", recon_imgs[b].cpu().numpy())
 
-            # tabular (now de‑normalised!)
+            # (4.c) tabular RAW, self‑describing (feature → valore, con tipi corretti)
+            names = ft.feature_list
+            def _to_py(v):
+                # JSON-safe: cast numpy scalars, preserve strings, map NaN -> null
+                if isinstance(v, np.generic): v = v.item()
+                if isinstance(v, float) and np.isnan(v): return None
+                return v
+
+            row = {names[i]: _to_py(raw_np[b, i]) for i in range(len(names))}
             with open(sd / "tabular.json", "w") as f:
-                json.dump(lat_tab_np[b].tolist(), f)
+                json.dump(row, f, ensure_ascii=False)
 
             # labels
             label_val = labels[b].item()
@@ -119,9 +217,14 @@ def generate(cfg: DictConfig):
             with open(sd / "metadata.json", "w") as f:
                 json.dump(metadata, f)
 
-            sample_idx += 1
+        produced += cur_bs
 
-    print("[INFO] Generation complete!")
+    if ddp:
+        dist.barrier()
+        cleanup_distributed()
+
+    if is_main_process():
+        print("[INFO] Generation complete!")
 
 # ------------------------------------------------------------------------- #
 # Hydra entry-point                                                        #

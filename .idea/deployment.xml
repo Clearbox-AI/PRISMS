@@ -1,12 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="giovanni@35.194.18.151:22 key" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" showNewOnTargetInSync="false">
+  <component name="PublishConfigData" autoUpload="Always" serverName="giovanni@34.29.199.143:22 password" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" showNewOnTargetInSync="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
       <paths name="giovanni@34.1.144.66:22 agent">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@34.169.197.84:22 password">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@34.29.199.143:22 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>
@@ -32,6 +46,27 @@
         </serverdata>
       </paths>
       <paths name="giovanni@35.209.192.157:22 key (3)">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.238.206.9:22 password">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.238.206.9:22 password (2)">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="giovanni@35.238.206.9:22 replica-normal">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
@@ -112,6 +147,13 @@
         <serverdata>
           <mappings>
             <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="prisms_flex2">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/PRISMS" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

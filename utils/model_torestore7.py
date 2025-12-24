@@ -10,6 +10,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 # -----------------------------------------------------------------------------
 
 def _ema_to_dict(ema_obj) -> dict:
+    """
+    Serializza EMA.
+      - AveragedModel: salva .module.state_dict e (opz.) n_averaged
+      - Lightweight CPUEMA: salva shadow (su CPU) + metadati
+    """
+    # AveragedModel
     if hasattr(ema_obj, "module"):
         return {
             "kind": "averaged_model",
@@ -28,25 +34,39 @@ def _ema_to_dict(ema_obj) -> dict:
             "num_updates": int(getattr(ema_obj, "num_updates", 0)),
             "base_decay": float(getattr(ema_obj, "base_decay", 0.9999)),
             "use_after_updates": int(getattr(ema_obj, "use_after_updates", 300)),
+            # back-compat: alcuni vecchi ckpt potrebbero aver salvato "decay"
             "decay": float(getattr(ema_obj, "base_decay", 0.9999)),
         }
 
     return {"kind": "none"}
 
 def _dict_to_ema(state: dict, ema_obj, device: torch.device) -> None:
+    """
+    Ripristina l'EMA **in-place** dentro `ema_obj` a partire da `state`.
+
+    Gestisce:
+      - kind="averaged_model": ema stile PyTorch AveragedModel (usa .module, opz. n_averaged/decay)
+      - kind="lightweight": EMA leggera (shadow dict su CPU + metadati)
+    È retro-compatibile con vecchi checkpoint che non salvavano num_updates/base_decay
+    e dove "decay" poteva essere 0.0.
+    """
     if not state:
         return
 
     kind = state.get("kind", "averaged_model")
 
     if kind == "averaged_model":
+        # .module è il modello medio (SWA/EMA di PyTorch)
         ema_obj.module.load_state_dict(state["state_dict"])
+        # ripristina il contatore se presente
         if "num_updates" in state and hasattr(ema_obj, "n_averaged"):
+            # n_averaged in PyTorch è un tensore; copiamo il valore
             val = int(state["num_updates"])
             if isinstance(ema_obj.n_averaged, torch.Tensor):
                 ema_obj.n_averaged.copy_(torch.tensor(val, device=device))
             else:
                 ema_obj.n_averaged = torch.tensor(val, device=device)
+        # ripristina eventuale decay (API AveragedModel)
         if "decay" in state:
             try:
                 ema_obj.decay = float(state["decay"])
@@ -55,17 +75,20 @@ def _dict_to_ema(state: dict, ema_obj, device: torch.device) -> None:
         return
 
     elif kind == "lightweight":
+        # *** Parte fondamentale: le shadow restano su CPU ***
         if hasattr(ema_obj, "shadow") and "shadow" in state:
             ema_obj.shadow.clear()
             for k, v in state["shadow"].items():
                 ema_obj.shadow[k] = v.detach().clone().cpu()
 
+        # Ripristina metadati, se presenti (senza sovrascrivere con 0.0 legacy)
         if "num_updates" in state:
             try:
                 ema_obj.num_updates = int(state["num_updates"])
             except Exception:
                 pass
 
+        # Preferisci "base_decay"; altrimenti usa "decay" solo se > 0 (evita il vecchio 0.0)
         if "base_decay" in state:
             try:
                 ema_obj.base_decay = float(state["base_decay"])
@@ -89,6 +112,11 @@ def _dict_to_ema(state: dict, ema_obj, device: torch.device) -> None:
 
 
 def _torch_load_safe(path: str, map_location: str | torch.device):
+    """
+    Carica un checkpoint in modo sicuro:
+      - prova con weights_only=True (PyTorch >= 2.4), così evitiamo l'avviso FutureWarning
+      - fallback a torch.load standard se l'argomento non è supportato
+    """
     try:
         return torch.load(path, map_location=map_location, weights_only=True)  # PyTorch recenti
     except TypeError:

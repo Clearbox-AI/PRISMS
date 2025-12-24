@@ -9,6 +9,13 @@
           </advancedOptions>
         </fileTransfer>
       </webServer>
+      <webServer id="7647c029-316c-4741-b14f-9266672bb177" name="prisms_flex2">
+        <fileTransfer accessType="SFTP" host="34.29.199.143" port="22" sshConfigId="fecc2a60-f506-4190-a9ee-ffc2c1bbc3ed" sshConfig="giovanni@34.29.199.143:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
     </option>
   </component>
 </project>

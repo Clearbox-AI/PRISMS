@@ -14,31 +14,42 @@ from sklearn.impute import SimpleImputer
 
 
 class _CatLogits:
-    """Utility to convert one-hot ⇄ logits per *single* feature."""
+    """
+    Utility to convert one-hot ⇄ logits per *single* feature.
+    EPS = 1e-3  # gentler tails to avoid ±9.2 scales
+    """
     EPS = 1e-4
     @staticmethod
-    def fwd(oh: np.ndarray) -> np.ndarray:          # one-hot → logits
-        return logit(np.clip((oh + _CatLogits.EPS) /
-                             (1 + _CatLogits.EPS),
-                             _CatLogits.EPS, 1 - _CatLogits.EPS))
+    def fwd(oh: np.ndarray) -> np.ndarray:
+        """
+        one-hot → tempered logits (label-smoothed):
+        p = (1-τ)*onehot + τ/k,  τ≈0.05..0.1
+        Then map to per-dim logit(p) to keep magnitudes moderate.
+        """
+
+        k = oh.shape[-1]
+        # gentler smoothing to avoid over‑compression of logits when k is small
+        tau = min(0.05, 1.0 / (k + 10))
+        p = (1.0 - tau) * oh + (tau / k)
+
+        return logit(np.clip(p, _CatLogits.EPS, 1 - _CatLogits.EPS))
 
     @staticmethod
     def inv(logits: np.ndarray) -> np.ndarray:
         """
-        logits → one-hot (Gumbel-Softmax)
-        During training you want a *high* τ (≈ 1.0) for smoother gradients,
-        and during pure sampling you want τ→0 for sharp argmax.
-        We follow TabDDPM and anneal τ exponentially with global step.
+        logits → one‑hot (deterministic argmax).
+        Decoding must be noise‑free and strictly invertible at sample time.
         """
-        import torch, torch.nn.functional as F
-        try:
-            gstep = torch.distributed.get_rank()  # non-DDP falls back except
-        except Exception:
-            gstep = 0
-        tau_sched = max(0.5, 1.0 * (0.999 ** gstep))
 
-        t = torch.tensor(logits)
-        return F.gumbel_softmax(t, tau=tau_sched, hard=True).cpu().numpy()
+        l = logits
+
+        if l.ndim == 1:
+            l = l[None]
+        idx = np.argmax(l, axis=-1)
+        oh = np.zeros_like(l, dtype=np.float32)
+        oh[np.arange(l.shape[0]), idx] = 1.0
+
+        return oh
 
 CAT_MISSING = "__nan__"
 EPS = 1e-5
@@ -79,28 +90,27 @@ def _build_num_pipeline(meta: dict) -> Tuple[Pipeline, NumSpec]:
     # (A) non-negative & unbounded  → clip-log1p-Standard
     if meta.get("sign") == "non-negative" and hi is None:
         pipe = Pipeline([
-            ("clip0", FunctionTransformer(lambda z: np.clip(z, 0., None),
-                                          validate=False)),
+            ("clip0", FunctionTransformer(lambda z: np.clip(z, 0.0, None),
+            feature_names_out="one-to-one")),
             ("log1p", FunctionTransformer(safe_log1p, np.expm1,
                                           validate=False)),
             ("std",   StandardScaler())
         ])
         return pipe, NumSpec("log1p", pipe["std"], is_int=is_int)
 
-    # (B) bounded [lo,hi]  → MinMax→logit      (TabDiff style)
-    _identity_tf = FunctionTransformer(lambda x: x, validate=False)
+    # (B) bounded [lo,hi] → MinMax([0,1]) → safe_logit → StandardScaler
     if lo is not None and hi is not None:
+        mm = MinMaxScaler(feature_range=(EPS, 1.0 - EPS))
         pipe = Pipeline([
-            ("mm", MinMaxScaler(feature_range=(EPS, 1. - EPS), clip=True)),
+            ("minmax", mm),
             ("logit", FunctionTransformer(safe_logit, expit, validate=False)),
+            ("std", StandardScaler())
         ])
-        # keep an identity "scaler" that *can* be pickled
-        id_tf = FunctionTransformer(_identity, validate=False)
-        return pipe, NumSpec("logit", id_tf, lo, hi, is_int)
+        return pipe, NumSpec("logit", pipe["std"], lo, hi, is_int)
 
     # (C) everything else  → Quantile→Normal
     qt = QuantileTransformer(output_distribution="normal",
-                             n_quantiles=1024, subsample=int(1e6))
+                             n_quantiles=2048, subsample=int(1e6))
     pipe = Pipeline([("qt", qt)])
     # keep an identity "scaler" so .inverse_transform still works
     return pipe, NumSpec("qt", qt, is_int=is_int)
@@ -180,7 +190,7 @@ def forward_transform(ft: FittedTransforms, row: np.ndarray) -> np.ndarray:
                 oh_slice = onehot[start:start + k]
                 encs.append(_CatLogits.fwd(oh_slice))
                 start += k
-            cat_enc = np.concatenate(encs, dtype=np.float32)
+            cat_enc = np.concatenate(encs).astype(np.float32)
         elif ft.cat_mode == "bits":
             # pack each feature into binary code
             encs = []
@@ -191,7 +201,7 @@ def forward_transform(ft: FittedTransforms, row: np.ndarray) -> np.ndarray:
                 bits = np.unpackbits(np.array([code], np.uint8), bitorder="little")[: w]
                 encs.append(bits.astype(np.float32))
                 start += k
-            cat_enc = np.concatenate(encs, dtype=np.float32)
+            cat_enc = np.concatenate(encs).astype(np.float32)
         else:
             cat_enc = onehot
 
@@ -202,16 +212,21 @@ def forward_transform(ft: FittedTransforms, row: np.ndarray) -> np.ndarray:
         v = row[ft.feature_list.index(col)]
         out.append(ft.num_pipes[col].transform([[v]]).ravel())
 
-    return np.concatenate(out, dtype=np.float32)
+    return np.concatenate(out).astype(np.float32)
 
 # ----------------------------------------------------------------------
-def inverse_transform(ft: FittedTransforms, x: np.ndarray) -> np.ndarray:
+def inverse_transform(ft: FittedTransforms, x: np.ndarray, *, return_object: bool = False) -> np.ndarray:
     if x.ndim == 1:
         x = x[None]
     B, n_cat = x.shape[0], sum(ft.cat_dims)
     cat_part, num_part = x[:, :n_cat], x[:, n_cat:]
 
-    raw = np.empty((B, len(ft.feature_list)), np.float32)
+    # (4.c) If return_object=True, keep categorical strings (object dtype);
+    # fallback to previous float32 behavior otherwise (backward compatible).
+    if return_object:
+        raw = np.empty((B, len(ft.feature_list)), dtype=object)
+    else:
+        raw = np.empty((B, len(ft.feature_list)), np.float32)
 
     # numeric
     for i, col in enumerate(ft.num_features):
@@ -219,8 +234,10 @@ def inverse_transform(ft: FittedTransforms, x: np.ndarray) -> np.ndarray:
         if spec.kind == "log1p":
             v = np.expm1(spec.scaler.inverse_transform(z))
         elif spec.kind == "logit":
-            v01 = expit(spec.scaler.inverse_transform(z))
-            v = spec.min + v01 * (spec.max - spec.min)
+            # Undo: StandardScaler ⟶ logit ⟶ MinMax([EPS, 1−EPS])
+            p = expit(spec.scaler.inverse_transform(z))
+            p = np.clip(p, EPS, 1.0 - EPS)  # enforce valid range
+            v = spec.min + (p - EPS) * (spec.max - spec.min) / (1.0 - 2.0 * EPS)
         elif spec.kind == "qt":
             v = spec.scaler.inverse_transform(z)
         else:  # "std"
@@ -250,5 +267,10 @@ def inverse_transform(ft: FittedTransforms, x: np.ndarray) -> np.ndarray:
         else:
             cats = ft.cat_encoder.inverse_transform(cat_part)
         for j, col in enumerate(ft.cat_features):
-            raw[:, ft.feature_list.index(col)] = cats[:, j].astype(np.float32)
+            if return_object:
+                # preserve original (possibly string) categories
+                raw[:, ft.feature_list.index(col)] = cats[:, j]
+            else:
+                # legacy behavior (numeric casting)
+                raw[:, ft.feature_list.index(col)] = cats[:, j].astype(np.float32)
     return raw

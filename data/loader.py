@@ -86,6 +86,7 @@ def load_training_data(cfg: DictConfig, *, real: bool = True) -> Union[DataLoade
                 stats_file=stats_path,
                 meta_json=meta_path,
                 tab_ft_path=ft_path,
+                regen_tab_ft=cfg.data.regen_tab_ft
             )
         else:
             raise NotImplementedError
@@ -404,6 +405,7 @@ def compute_dataset_meta(
                 "min": fmin,
                 "max": fmax,
                 "sign": _infer_sign(fmin, fmax),
+                "dtype": "categorical" if idx == 0 else "numeric"
             }
         )
 
